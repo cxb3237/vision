@@ -32,6 +32,12 @@ python -m pip install -r requirements.txt
 python -m pytest -q
 ```
 
+Linux / Raspberry Pi 需要安装 V4L2 控制工具，才能自动应用白平衡、亮度等硬件参数：
+
+```bash
+sudo apt install v4l-utils
+```
+
 无桌面 Raspberry Pi OS 可以把 `opencv-python` 替换为 `opencv-python-headless`，不要同时安装
 二者。可使用 `ls /dev/video*` 或 `v4l2-ctl --list-devices` 查找摄像头设备。
 
@@ -72,6 +78,25 @@ python -m tools.mock_mspm0 --port loop:// --mode track
 ```
 
 所有命令的当前参数以各自的 `--help` 为准。
+
+### Linux V4L2 摄像头参数
+
+`config/camera.yaml` 的可选 `v4l2_controls` 段用于设置白平衡、工频、背光补偿、亮度、对比度、
+饱和度、色调、Gamma 和锐度。`enabled: false` 会完全跳过；值为 `null` 的单项不会设置；
+`strict: false` 只警告不支持的项目，`strict: true` 会让严格设置失败终止本次采集启动。
+
+可先应用配置并回读摄像头实际值：
+
+```bash
+python3 -m tools.camera_profile_check \
+  --device 0 \
+  --camera-config config/camera.yaml \
+  --apply
+```
+
+摄像头拔插或系统重启后，部分 V4L2 参数可能恢复默认值。因此正式程序的 `CameraService` 会在
+第一次打开摄像头、断线重连以及同一服务对象重新启动时自动重新应用配置。Windows 和 macOS
+会安全跳过 V4L2 命令，原有 OpenCV 分辨率、FPS、FOURCC、曝光等设置仍会继续执行。
 
 ### 直径 10 mm 钢球检测
 

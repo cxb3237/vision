@@ -107,6 +107,7 @@ class CameraConfig:
     brightness: float | None = None
     contrast: float | None = None
     reconnect_after_failures: int = 20
+    v4l2_controls: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

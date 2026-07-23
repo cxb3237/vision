@@ -95,6 +95,20 @@ def load_camera_config(
         value = data[key]
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
             raise ConfigError(f"字段 {key} 必须为数值或 null")
+    v4l2_controls = data.get("v4l2_controls")
+    if v4l2_controls is not None:
+        if not isinstance(v4l2_controls, dict):
+            raise ConfigError("v4l2_controls 必须为映射或 null")
+        for flag in ("enabled", "strict"):
+            if flag in v4l2_controls and not isinstance(v4l2_controls[flag], bool):
+                raise ConfigError(f"v4l2_controls.{flag} 必须为布尔值")
+        for name, value in v4l2_controls.items():
+            if name in {"enabled", "strict"}:
+                continue
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise ConfigError(f"v4l2_controls.{name} 必须为整数或 null")
     try:
         return CameraConfig(**data)
     except TypeError as exc:

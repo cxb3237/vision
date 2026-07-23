@@ -12,6 +12,11 @@ from typing import Any, Protocol
 import cv2
 
 from core.models import CameraConfig, FramePacket
+from drivers.v4l2_controls import (
+    V4L2ControlError,
+    apply_v4l2_controls,
+    read_v4l2_controls,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -91,10 +96,37 @@ class CameraService:
         capture.release()
         return None
 
+    def _apply_v4l2_profile(self) -> None:
+        """在采集线程打开设备前应用并回读 Linux V4L2 参数。"""
+
+        profile = self.config.v4l2_controls
+        if not profile or not profile.get("enabled", False):
+            return
+        strict = bool(profile.get("strict", False))
+        requested = {
+            name: value
+            for name, value in profile.items()
+            if name not in {"enabled", "strict"} and value is not None
+        }
+        if not requested:
+            return
+        LOG.info("准备应用 V4L2 参数 device=%s requested=%s", self.config.device, requested)
+        results = apply_v4l2_controls(self.config.device, requested, strict=strict)
+        actual = read_v4l2_controls(self.config.device, list(requested))
+        failed = [name for name, result in results.items() if not result["success"]]
+        LOG.info(
+            "V4L2 参数结果 device=%s requested=%s actual=%s failed=%s",
+            self.config.device,
+            requested,
+            actual,
+            failed,
+        )
+
     def _open_capture(self) -> CaptureLike | None:
         """在采集线程内创建并配置摄像头。"""
 
         try:
+            self._apply_v4l2_profile()
             preferred_api = cv2.CAP_V4L2 if platform.system() == "Linux" else cv2.CAP_ANY
             capture = self._open_with_api(preferred_api)
             if capture is None and preferred_api != cv2.CAP_ANY and self._capture_factory is None:
@@ -178,6 +210,8 @@ class CameraService:
                 actual_fourcc,
             )
             return capture
+        except V4L2ControlError:
+            raise
         except Exception as exc:
             now = time.monotonic()
             if now - self._last_open_log >= 2.0:
@@ -217,7 +251,12 @@ class CameraService:
         try:
             while not self._stop_event.is_set():
                 if self._capture is None:
-                    self._capture = self._open_capture()
+                    try:
+                        self._capture = self._open_capture()
+                    except V4L2ControlError as exc:
+                        LOG.error("严格模式下应用 V4L2 参数失败，停止采集线程: %s", exc)
+                        self._stop_event.set()
+                        break
                     if self._capture is None:
                         self._stop_event.wait(0.25)
                         continue
