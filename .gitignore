@@ -1,0 +1,42 @@
+# Python 虚拟环境
+.venv/
+venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# 日志：保留空目录
+logs/*
+!logs/.gitkeep
+
+# 录像：保留空目录
+data/recordings/*
+!data/recordings/.gitkeep
+
+# 调试输出：保留空目录
+data/debug/*
+!data/debug/.gitkeep
+
+# 标定图片：保留空目录
+data/calibration/images/*
+!data/calibration/images/.gitkeep
+
+data/calibration/visualized/*
+!data/calibration/visualized/.gitkeep
+
+# 大型媒体和日志
+*.mp4
+*.avi
+*.log
+
+# 私密配置
+.env
+.env.*
+*.key

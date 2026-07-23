@@ -1,0 +1,7 @@
+min_area: 300
+max_area: 300000
+canny_low: 60
+canny_high: 140
+approximation_factor: 0.04
+square_ratio_tolerance: 0.15
+circle_threshold: 0.70

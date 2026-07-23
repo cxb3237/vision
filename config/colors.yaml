@@ -1,0 +1,36 @@
+red:
+  ranges: [{lower: [0, 100, 80], upper: [10, 255, 255]}, {lower: [170, 100, 80], upper: [179, 255, 255]}]
+  min_area: 300
+  max_area: 300000
+  morph_open: 3
+  morph_close: 5
+green:
+  ranges: [{lower: [35, 70, 50], upper: [85, 255, 255]}]
+  min_area: 300
+  max_area: 300000
+  morph_open: 3
+  morph_close: 5
+blue:
+  ranges: [{lower: [90, 70, 50], upper: [130, 255, 255]}]
+  min_area: 300
+  max_area: 300000
+  morph_open: 3
+  morph_close: 5
+yellow:
+  ranges: [{lower: [20, 80, 80], upper: [35, 255, 255]}]
+  min_area: 300
+  max_area: 300000
+  morph_open: 3
+  morph_close: 5
+black:
+  ranges: [{lower: [0, 0, 0], upper: [179, 255, 60]}]
+  min_area: 300
+  max_area: 300000
+  morph_open: 3
+  morph_close: 5
+white:
+  ranges: [{lower: [0, 0, 180], upper: [179, 60, 255]}]
+  min_area: 300
+  max_area: 300000
+  morph_open: 3
+  morph_close: 5

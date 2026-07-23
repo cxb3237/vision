@@ -1,0 +1,13 @@
+device: 0
+width: 640
+height: 480
+fps: 30
+fourcc: MJPG
+buffer_size: 1
+manual_exposure: false
+exposure: null
+gain: null
+auto_white_balance: true
+brightness: null
+contrast: null
+reconnect_after_failures: 20

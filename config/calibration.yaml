@@ -1,0 +1,7 @@
+calibrated: false
+image_width: 640
+image_height: 480
+camera_matrix: []
+distortion_coefficients: []
+reprojection_error: null
+rms_error: null
