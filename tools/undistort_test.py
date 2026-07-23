@@ -18,6 +18,13 @@ from drivers.camera_service import CameraService
 LOG = logging.getLogger(__name__)
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("必须大于 0")
+    return parsed
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     """创建去畸变测试参数解析器。"""
 
@@ -30,7 +37,25 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alpha", type=float, default=0.0, help="有效像素与视野权衡 0..1")
     parser.add_argument("--display", action="store_true", help="显示原图和结果对比")
     parser.add_argument("--output", default="undistorted.jpg", help="结果图片路径")
+    parser.add_argument(
+        "--frame-timeout",
+        type=_positive_float,
+        default=5.0,
+        help="等待新 frame_id 的连续超时秒数，默认 5",
+    )
     return parser
+
+
+def is_new_frame_timed_out(
+    now: float,
+    last_new_frame_time: float,
+    timeout_seconds: float,
+) -> bool:
+    """判断是否已连续指定时长没有收到新帧。"""
+
+    if timeout_seconds <= 0:
+        raise ValueError("frame timeout must be greater than zero")
+    return now - last_new_frame_time >= timeout_seconds
 
 
 def validate_calibration_resolution(image: np.ndarray, calibration: CalibrationConfig) -> None:
@@ -65,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
     if not 0 <= args.alpha <= 1:
         raise SystemExit("--alpha 必须在 0..1 范围内")
+    if args.frame_timeout <= 0:
+        raise SystemExit("--frame-timeout 必须大于 0")
     calibration = load_calibration_config(args.config)
     if not calibration.calibrated:
         raise SystemExit("相机尚未标定")
@@ -94,16 +121,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             camera = CameraService(config)
             camera.start()
-            deadline = time.monotonic() + 5.0
             last_frame_id: int | None = None
+            last_new_frame_time = time.monotonic()
             while True:
                 frame = camera.get_latest_frame(copy_image=True)
+                now = time.monotonic()
                 if frame is None or frame.frame_id == last_frame_id:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("等待标定分辨率摄像头帧超过 5 秒")
+                    if is_new_frame_timed_out(now, last_new_frame_time, args.frame_timeout):
+                        raise TimeoutError(
+                            f"连续 {args.frame_timeout:g} 秒未收到新的摄像头帧"
+                        )
                     time.sleep(0.005)
                     continue
                 last_frame_id = frame.frame_id
+                last_new_frame_time = now
                 image = frame.image
                 validate_calibration_resolution(image, calibration)
                 last_output, _ = _undistort(image, matrix, distortion, args.alpha)

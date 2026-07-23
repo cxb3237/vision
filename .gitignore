@@ -40,3 +40,4 @@ data/calibration/visualized/*
 .env
 .env.*
 *.key
+config/calibration.yaml

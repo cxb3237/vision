@@ -43,8 +43,8 @@ def calculate_reprojection_error(
 ) -> float:
     """计算所有有效图片的平均单点欧氏重投影误差。"""
 
-    total_error = 0.0
-    total_points = 0
+    total_squared_error = 0.0
+    total_point_count = 0
     for objects, observed, rotation, translation in zip(
         object_points,
         image_points,
@@ -58,9 +58,19 @@ def calculate_reprojection_error(
             camera_matrix,
             distortion,
         )
-        total_error += cv2.norm(observed, projected, cv2.NORM_L2) ** 2
-        total_points += len(projected)
-    return float(np.sqrt(total_error / max(total_points, 1)))
+        observed_xy = np.asarray(observed, dtype=np.float64).reshape(-1, 2)
+        projected_xy = np.asarray(projected, dtype=np.float64).reshape(-1, 2)
+        if observed_xy.shape != projected_xy.shape:
+            raise ValueError(
+                "Observed and projected point counts do not match: "
+                f"observed={observed_xy.shape[0]}, projected={projected_xy.shape[0]}"
+            )
+        residuals = observed_xy - projected_xy
+        total_squared_error += float(np.sum(residuals * residuals))
+        total_point_count += observed_xy.shape[0]
+    if total_point_count == 0:
+        raise ValueError("Cannot calculate reprojection error without image points")
+    return float(np.sqrt(total_squared_error / total_point_count))
 
 
 def main(argv: list[str] | None = None) -> int:

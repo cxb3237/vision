@@ -43,6 +43,16 @@ class SteelBallDebugData:
     mask: np.ndarray
     candidate_count: int
     processing_ms: float
+    selected_diameter_px: float | None = None
+    selected_circularity: float | None = None
+    selected_aspect_ratio: float | None = None
+    selected_area_px: float | None = None
+    selected_hough_verified: bool | None = None
+    rejected_by_area: int = 0
+    rejected_by_diameter: int = 0
+    rejected_by_circularity: int = 0
+    rejected_by_aspect_ratio: int = 0
+    rejected_by_hough: int = 0
 
 
 def estimate_distance_mm(
@@ -53,12 +63,16 @@ def estimate_distance_mm(
     """按 fx*真实直径/像素直径估算距离，无效时返回协议未知值。"""
 
     values = (fx_px, known_diameter_mm, diameter_px)
-    if any(value is None or not math.isfinite(float(value)) for value in values):
+    try:
+        numeric_values = tuple(float(value) for value in values if value is not None)
+    except (TypeError, ValueError):
         return 0xFFFF
-    assert fx_px is not None
-    if fx_px <= 0 or known_diameter_mm <= 0 or diameter_px <= 0:
+    if len(numeric_values) != 3 or any(not math.isfinite(value) for value in numeric_values):
         return 0xFFFF
-    distance = fx_px * known_diameter_mm / diameter_px
+    fx_value, known_value, diameter_value = numeric_values
+    if fx_value <= 0 or known_value <= 0 or diameter_value <= 0:
+        return 0xFFFF
+    distance = fx_value * known_value / diameter_value
     if not math.isfinite(distance) or distance <= 0:
         return 0xFFFF
     return min(0xFFFE, max(0, round(distance)))
@@ -77,7 +91,18 @@ class SteelBallDetector(BaseDetector):
         self.target_class = config.target_class
         self._debug: SteelBallDebugData | None = None
         self._last_candidate: BallCandidate | None = None
+        self._rejection_counts = self._empty_rejection_counts()
         self.reset()
+
+    @staticmethod
+    def _empty_rejection_counts() -> dict[str, int]:
+        return {
+            "area": 0,
+            "diameter": 0,
+            "circularity": 0,
+            "aspect_ratio": 0,
+            "hough": 0,
+        }
 
     def initialize(self) -> None:
         """重置检测时序状态。"""
@@ -199,39 +224,49 @@ class SteelBallDetector(BaseDetector):
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         hough_circles = self._hough_circles(enhanced)
         candidates: list[BallCandidate] = []
+        rejections = self._empty_rejection_counts()
         offset_x, offset_y = roi_offset
         for contour in contours:
             area = float(cv2.contourArea(contour))
+            if not math.isfinite(area) or not self.config.min_area_px <= area <= self.config.max_area_px:
+                rejections["area"] += 1
+                continue
             perimeter = float(cv2.arcLength(contour, True))
-            if perimeter <= 0:
+            if not math.isfinite(perimeter) or perimeter <= 0:
+                rejections["circularity"] += 1
                 continue
             x, y, width, height = cv2.boundingRect(contour)
             (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
             equivalent_diameter = math.sqrt(4.0 * area / math.pi) if area > 0 else 0.0
             circularity = 4.0 * math.pi * area / (perimeter * perimeter)
             aspect_ratio = width / max(height, 1)
+            if not math.isfinite(equivalent_diameter) or not (
+                self.config.min_diameter_px
+                <= equivalent_diameter
+                <= self.config.max_diameter_px
+            ):
+                rejections["diameter"] += 1
+                continue
+            if not math.isfinite(circularity) or circularity < self.config.min_circularity:
+                rejections["circularity"] += 1
+                continue
+            if not math.isfinite(aspect_ratio) or not (
+                self.config.min_aspect_ratio
+                <= aspect_ratio
+                <= self.config.max_aspect_ratio
+            ):
+                rejections["aspect_ratio"] += 1
+                continue
+            if not all(math.isfinite(value) for value in (center_x, center_y, radius)):
+                rejections["diameter"] += 1
+                continue
             hough_verified = self._matches_hough(
                 (center_x, center_y),
                 radius,
                 hough_circles,
             )
-            if not self.config.min_area_px <= area <= self.config.max_area_px:
-                continue
-            if not (
-                self.config.min_diameter_px
-                <= equivalent_diameter
-                <= self.config.max_diameter_px
-            ):
-                continue
-            if circularity < self.config.min_circularity:
-                continue
-            if not (
-                self.config.min_aspect_ratio
-                <= aspect_ratio
-                <= self.config.max_aspect_ratio
-            ):
-                continue
             if self.config.hough_enabled and not hough_verified:
+                rejections["hough"] += 1
                 continue
             global_contour = contour.copy()
             global_contour[:, :, 0] += offset_x
@@ -250,6 +285,7 @@ class SteelBallDetector(BaseDetector):
                     hough_verified=hough_verified,
                 )
             )
+        self._rejection_counts = rejections
         return candidates
 
     def _size_score(self, candidate: BallCandidate) -> float:
@@ -303,14 +339,18 @@ class SteelBallDetector(BaseDetector):
             1.0 - abs(candidate.aspect_ratio - aspect_center) / aspect_half_span,
         )
         stability_score = min(1.0, self._hits / max(self.config.confirm_frames, 1))
-        hough_score = 1.0 if candidate.hough_verified else 0.5
-        confidence = 1000.0 * (
+        base_score = (
             0.40 * circularity_score
             + 0.25 * self._size_score(candidate)
             + 0.15 * aspect_score
             + 0.15 * stability_score
-            + 0.05 * hough_score
         )
+        if self.config.hough_enabled:
+            confidence = 1000.0 * (
+                base_score + 0.05 * float(candidate.hough_verified)
+            )
+        else:
+            confidence = 1000.0 * base_score / 0.95
         return max(0, min(1000, round(confidence)))
 
     def _fx(self) -> float | None:
@@ -365,10 +405,20 @@ class SteelBallDetector(BaseDetector):
         now = time.monotonic()
         processing_ms = (now - process_start) * 1000.0
         self._debug = SteelBallDebugData(
-            enhanced.copy(),
-            mask.copy(),
-            len(candidates),
-            processing_ms,
+            enhanced=enhanced.copy(),
+            mask=mask.copy(),
+            candidate_count=len(candidates),
+            processing_ms=processing_ms,
+            selected_diameter_px=(selected.equivalent_diameter if selected else None),
+            selected_circularity=(selected.circularity if selected else None),
+            selected_aspect_ratio=(selected.aspect_ratio if selected else None),
+            selected_area_px=(selected.area if selected else None),
+            selected_hough_verified=(selected.hough_verified if selected else None),
+            rejected_by_area=self._rejection_counts["area"],
+            rejected_by_diameter=self._rejection_counts["diameter"],
+            rejected_by_circularity=self._rejection_counts["circularity"],
+            rejected_by_aspect_ratio=self._rejection_counts["aspect_ratio"],
+            rejected_by_hough=self._rejection_counts["hough"],
         )
         if selected is None:
             return self._missing_result(frame, now, processing_ms)
@@ -418,10 +468,20 @@ class SteelBallDetector(BaseDetector):
         if self._debug is None:
             return None
         return SteelBallDebugData(
-            self._debug.enhanced.copy(),
-            self._debug.mask.copy(),
-            self._debug.candidate_count,
-            self._debug.processing_ms,
+            enhanced=self._debug.enhanced.copy(),
+            mask=self._debug.mask.copy(),
+            candidate_count=self._debug.candidate_count,
+            processing_ms=self._debug.processing_ms,
+            selected_diameter_px=self._debug.selected_diameter_px,
+            selected_circularity=self._debug.selected_circularity,
+            selected_aspect_ratio=self._debug.selected_aspect_ratio,
+            selected_area_px=self._debug.selected_area_px,
+            selected_hough_verified=self._debug.selected_hough_verified,
+            rejected_by_area=self._debug.rejected_by_area,
+            rejected_by_diameter=self._debug.rejected_by_diameter,
+            rejected_by_circularity=self._debug.rejected_by_circularity,
+            rejected_by_aspect_ratio=self._debug.rejected_by_aspect_ratio,
+            rejected_by_hough=self._debug.rejected_by_hough,
         )
 
     def draw_debug(self, image: np.ndarray, result: VisionResult) -> np.ndarray:
@@ -455,6 +515,14 @@ class SteelBallDetector(BaseDetector):
             circularity_text,
             f"confidence={result.confidence} state={state_name}",
             f"distance={result.distance_mm if result.distance_mm != 0xFFFF else '--'} mm",
+            (
+                "reject "
+                f"area={self._debug.rejected_by_area if self._debug else 0} "
+                f"diam={self._debug.rejected_by_diameter if self._debug else 0} "
+                f"circ={self._debug.rejected_by_circularity if self._debug else 0} "
+                f"aspect={self._debug.rejected_by_aspect_ratio if self._debug else 0} "
+                f"hough={self._debug.rejected_by_hough if self._debug else 0}"
+            ),
         )
         for index, text in enumerate(lines):
             cv2.putText(

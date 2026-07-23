@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 import math
 from typing import Any
 
@@ -12,6 +13,9 @@ from core.models import CalibrationConfig, CameraConfig, ShapeConfig, SteelBallC
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOG = logging.getLogger(__name__)
+DEFAULT_CALIBRATION_PATH = Path("config/calibration.yaml")
+DEFAULT_CALIBRATION_EXAMPLE_PATH = Path("config/calibration.example.yaml")
 
 
 class ConfigError(ValueError):
@@ -197,7 +201,12 @@ def load_calibration_config(
 ) -> CalibrationConfig:
     """读取相机标定配置。"""
 
-    data = _read(path)
+    resolved = resolve_config_path(path)
+    default_resolved = resolve_config_path(DEFAULT_CALIBRATION_PATH)
+    if resolved == default_resolved and not resolved.exists():
+        resolved = resolve_config_path(DEFAULT_CALIBRATION_EXAMPLE_PATH)
+    LOG.info("读取标定配置: %s", resolved)
+    data = _read(resolved)
     _required(
         data,
         (

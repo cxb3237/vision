@@ -1,6 +1,9 @@
 """YAML 配置加载和校验测试。"""
 
 import pytest
+import yaml
+
+import core.config_loader as config_loader
 
 from core.config_loader import (
     ConfigError,
@@ -62,3 +65,42 @@ def test_shape_config_is_loaded_from_yaml() -> None:
     config = load_shape_config()
     assert config.canny_low < config.canny_high
     assert config.min_area <= config.max_area
+
+
+def _write_calibration(path, *, width: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "calibrated": False,
+                "image_width": width,
+                "image_height": 480,
+                "camera_matrix": [],
+                "distortion_coefficients": [],
+                "reprojection_error": None,
+                "rms_error": None,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_default_calibration_prefers_local_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(config_loader, "PROJECT_ROOT", tmp_path)
+    _write_calibration(tmp_path / "config/calibration.example.yaml", width=320)
+    _write_calibration(tmp_path / "config/calibration.yaml", width=800)
+    assert load_calibration_config().image_width == 800
+
+
+def test_default_calibration_falls_back_to_example(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(config_loader, "PROJECT_ROOT", tmp_path)
+    _write_calibration(tmp_path / "config/calibration.example.yaml", width=320)
+    assert load_calibration_config().image_width == 320
+
+
+def test_explicit_missing_custom_calibration_does_not_fall_back(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(config_loader, "PROJECT_ROOT", tmp_path)
+    _write_calibration(tmp_path / "config/calibration.example.yaml", width=320)
+    with pytest.raises(ConfigError, match="missing-custom.yaml"):
+        load_calibration_config("config/missing-custom.yaml")

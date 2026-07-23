@@ -63,8 +63,8 @@ python app.py --mode track --video data/recordings/test.mp4 --display --no-seria
 
 # 标定要求默认至少 8 张有效、同分辨率棋盘图
 python -m tools.capture_calibration --device 0 --camera-config config/camera.yaml --output-dir data/calibration/images --cols 9 --rows 6 --max-images 25
-python -m tools.calibrate_camera --images data/calibration/images --cols 9 --rows 6 --square-size-mm 25
-python -m tools.undistort_test --input data/samples/test.jpg --alpha 0 --display
+python -m tools.calibrate_camera --images data/calibration/images --cols 9 --rows 6 --square-size-mm 24 --visualization-dir data/calibration/visualized
+python -m tools.undistort_test --input data/samples/test.jpg --alpha 0 --frame-timeout 5 --display
 
 # MSPM0 控制台或串口模拟
 python -m tools.mock_mspm0 --console
@@ -85,8 +85,8 @@ python -m tools.mock_mspm0 --port loop:// --mode track
 python app.py --mode track --detector steel_ball --display --no-serial
 ```
 
-实时调参会复用 `CameraService`，显示原图、增强灰度图、二值掩膜和最终候选。按 `S` 原子保存
-到 `config/steel_ball.yaml`，按 `Q` 退出：
+实时调参会复用 `CameraService`，收到第一张有效帧并确认实际分辨率后才创建控制窗口，显示原图、
+增强灰度图、二值掩膜、最终候选，以及面积、直径、圆度、宽高比和 Hough 各类拒绝统计：
 
 ```bash
 python -m tools.steel_ball_tuner \
@@ -95,6 +95,13 @@ python -m tools.steel_ball_tuner \
   --config config/steel_ball.yaml \
   --calibration-config config/calibration.yaml
 ```
+
+滑动条包括阈值/自适应块大小与 C、Gaussian 和开闭运算、CLAHE 开关/clip/tile、面积与直径范围、
+圆度与宽高比范围、Hough 参数、最大跳变、确认/丢失帧数及 ROI 开关和矩形范围。按 `S` 将全部
+字段原子保存到 `config/steel_ball.yaml`，按 `R` 从磁盘重载配置并同步所有滑动条，按 `Q` 退出。
+
+建议先使用 10 mm 钢球、深色哑光背景和柔和漫射光，在 20～50 cm 距离开始调节。初次调参先
+关闭 Hough，待轮廓检测稳定后再开启复核，避免高光和阴影掩盖真正的过滤原因。
 
 离线回放：
 
@@ -135,6 +142,40 @@ python -m tools.capture_calibration \
 `--min-blur` 和 `--min-board-area-ratio` 调整。`--force-save` 只跳过清晰度和面积阈值，
 仍要求找到全部内部角点并拒绝重复 `frame_id`。图片按 `calib_0001.jpg` 连续编号，详细记录
 增量写入同目录的 `metadata.jsonl`。达到 `--max-images` 后程序只提示数量足够，不会自动退出。
+
+### 相机标定与去畸变
+
+下面的标定命令兼容 OpenCV 5.0，会将角点统一成相同的二维 `float64` 形状后计算单点 RMS
+重投影误差：
+
+```bash
+python3 -m tools.calibrate_camera \
+  --images data/calibration/images \
+  --cols 9 \
+  --rows 6 \
+  --square-size-mm 24 \
+  --visualization-dir data/calibration/visualized
+```
+
+实时去畸变示例：
+
+```bash
+python3 -m tools.undistort_test \
+  --device 0 \
+  --config config/calibration.yaml \
+  --camera-config config/camera.yaml \
+  --alpha 0 \
+  --frame-timeout 5 \
+  --display
+```
+
+带 `--display` 时窗口会一直运行到按 `Q`。`--frame-timeout` 只在连续指定秒数没有收到新的
+`frame_id` 时触发；收到新帧就重新计时。输入或摄像头分辨率必须与标定分辨率一致。
+
+`config/calibration.example.yaml` 是受版本控制的未标定模板；真实标定结果写入本地
+`config/calibration.yaml`，该文件被 Git 忽略，因此拉取代码不会覆盖本机参数。更换摄像头、焦距、
+分辨率或安装结构后必须重新标定。若本地文件尚不存在，配置加载器会自动读取模板；显式指定的
+其他配置文件不存在时仍会报错。
 
 ## 摄像头和串口生命周期
 

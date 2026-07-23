@@ -1,5 +1,6 @@
 """SteelBallDetector 的合成图像和时序状态测试。"""
 
+from dataclasses import replace
 import time
 
 import cv2
@@ -60,8 +61,10 @@ def test_single_circle_is_detected() -> None:
 
 
 def test_too_small_circle_is_filtered() -> None:
-    result = SteelBallDetector(detector_config()).process(packet(circle_image(radius=4)))
+    detector = SteelBallDetector(detector_config())
+    result = detector.process(packet(circle_image(radius=4)))
     assert not result.found
+    assert detector.get_debug_data().rejected_by_area >= 1
 
 
 def test_too_large_circle_is_filtered() -> None:
@@ -94,8 +97,10 @@ def test_irregular_contour_is_filtered_by_circularity() -> None:
         np.int32,
     )
     cv2.fillPoly(image, [points], (255, 255, 255))
-    result = SteelBallDetector(detector_config()).process(packet(image))
+    detector = SteelBallDetector(detector_config())
+    result = detector.process(packet(image))
     assert not result.found
+    assert detector.get_debug_data().rejected_by_circularity >= 1
 
 
 def test_multiple_targets_prefer_candidate_near_previous_center() -> None:
@@ -161,6 +166,13 @@ def test_known_fx_and_diameters_produce_correct_distance() -> None:
     assert 190 <= result.distance_mm <= 210
 
 
+def test_invalid_distance_inputs_return_unknown() -> None:
+    assert estimate_distance_mm(float("nan"), 10.0, 40.0) == 0xFFFF
+    assert estimate_distance_mm(800.0, 0.0, 40.0) == 0xFFFF
+    assert estimate_distance_mm(800.0, 10.0, float("inf")) == 0xFFFF
+    assert estimate_distance_mm("invalid", 10.0, 40.0) == 0xFFFF
+
+
 def test_roi_excludes_targets_outside_region() -> None:
     config = detector_config(roi=[0, 0, 120, 240])
     detector = SteelBallDetector(config)
@@ -182,3 +194,47 @@ def test_app_and_replay_accept_steel_ball_detector() -> None:
     assert app_args.detector == "steel_ball"
     assert replay_args.detector == "steel_ball"
     assert isinstance(detector, SteelBallDetector)
+
+
+def test_debug_reports_rejection_reasons() -> None:
+    image = blank()
+    cv2.circle(image, (50, 60), 4, (255, 255, 255), -1)
+    cv2.ellipse(image, (160, 120), (30, 12), 0, 0, 360, (255, 255, 255), -1)
+    detector = SteelBallDetector(
+        detector_config(min_area_px=1, min_diameter_px=15, min_circularity=0.1)
+    )
+    detector.process(packet(image))
+    debug = detector.get_debug_data()
+    assert debug is not None
+    assert debug.rejected_by_diameter >= 1
+    assert debug.rejected_by_aspect_ratio >= 1
+
+
+def test_nonfinite_perimeter_is_safely_rejected(monkeypatch) -> None:
+    detector = SteelBallDetector(detector_config())
+    monkeypatch.setattr(cv2, "arcLength", lambda *args: float("nan"))
+    result = detector.process(packet(circle_image()))
+    debug = detector.get_debug_data()
+    assert not result.found
+    assert debug is not None
+    assert debug.rejected_by_circularity >= 1
+
+
+def test_hough_disabled_does_not_change_confidence() -> None:
+    detector = SteelBallDetector(detector_config(hough_enabled=False))
+    result = detector.process(packet(circle_image()))
+    candidate = detector._last_candidate
+    assert candidate is not None
+    baseline = detector._confidence(candidate)
+    altered = replace(candidate, hough_verified=not candidate.hough_verified)
+    assert detector._confidence(altered) == baseline
+
+
+def test_hough_rejection_is_reported_when_enabled(monkeypatch) -> None:
+    detector = SteelBallDetector(detector_config(hough_enabled=True))
+    monkeypatch.setattr(detector, "_hough_circles", lambda enhanced: [])
+    result = detector.process(packet(circle_image()))
+    debug = detector.get_debug_data()
+    assert not result.found
+    assert debug is not None
+    assert debug.rejected_by_hough >= 1
