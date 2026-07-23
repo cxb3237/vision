@@ -9,7 +9,13 @@ from typing import Any
 
 import yaml
 
-from core.models import CalibrationConfig, CameraConfig, ShapeConfig, SteelBallConfig
+from core.models import (
+    CalibrationConfig,
+    CameraConfig,
+    DigitConfig,
+    ShapeConfig,
+    SteelBallConfig,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -187,8 +193,8 @@ def load_mission_config(
         "calibration",
     }:
         raise ConfigError("default_mode 必须是当前已实现的 idle/search/track/calibration")
-    if data["detector"] not in {"color", "shape", "steel_ball"}:
-        raise ConfigError("detector 必须是 color、shape 或 steel_ball")
+    if data["detector"] not in {"color", "shape", "steel_ball", "digit"}:
+        raise ConfigError("detector 必须是 color、shape、steel_ball 或 digit")
     for key in (
         "confirm_frames",
         "lost_frames",
@@ -304,6 +310,154 @@ def load_shape_config(path: str | Path = "config/shapes.yaml") -> ShapeConfig:
         return ShapeConfig(**data)
     except TypeError as exc:
         raise ConfigError(f"形状配置包含未知字段: {exc}") from exc
+
+
+def load_digit_config(path: str | Path = "config/digit.yaml") -> DigitConfig:
+    """读取并逐字段校验单个印刷数字检测配置。"""
+
+    data = _read(path)
+    groups = ("roi", "preprocess", "candidate", "normalization", "matching", "tracking")
+    _required(data, groups)
+    for group in groups:
+        if not isinstance(data[group], dict):
+            raise ConfigError(f"digit.{group} 必须为映射")
+
+    roi = data["roi"]
+    _required(roi, ("enabled", "x", "y", "width", "height"))
+    if not isinstance(roi["enabled"], bool):
+        raise ConfigError("digit.roi.enabled 必须为布尔值")
+    for key in ("x", "y", "width", "height"):
+        value = roi[key]
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ConfigError(f"digit.roi.{key} 必须为整数")
+    if roi["x"] < 0 or roi["y"] < 0 or roi["width"] <= 0 or roi["height"] <= 0:
+        raise ConfigError("digit.roi 必须具有非负坐标和正数宽高")
+
+    preprocess = data["preprocess"]
+    _required(
+        preprocess,
+        (
+            "use_clahe",
+            "clahe_clip_limit",
+            "threshold_mode",
+            "fixed_threshold",
+            "adaptive_block_size",
+            "adaptive_c",
+            "invert",
+            "gaussian_kernel",
+            "morph_open",
+            "morph_close",
+        ),
+    )
+    for key in ("use_clahe", "invert"):
+        if not isinstance(preprocess[key], bool):
+            raise ConfigError(f"digit.preprocess.{key} 必须为布尔值")
+    if preprocess["threshold_mode"] not in {"fixed", "otsu", "adaptive"}:
+        raise ConfigError("digit.preprocess.threshold_mode 必须是 fixed、otsu 或 adaptive")
+    threshold = preprocess["fixed_threshold"]
+    if not isinstance(threshold, int) or isinstance(threshold, bool) or not 0 <= threshold <= 255:
+        raise ConfigError("digit.preprocess.fixed_threshold 必须为 0..255 整数")
+    clip_limit = preprocess["clahe_clip_limit"]
+    if isinstance(clip_limit, bool) or not isinstance(clip_limit, (int, float)) or clip_limit <= 0:
+        raise ConfigError("digit.preprocess.clahe_clip_limit 必须为正数")
+    block_size = preprocess["adaptive_block_size"]
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size < 3
+        or block_size % 2 == 0
+    ):
+        raise ConfigError("digit.preprocess.adaptive_block_size 必须为不小于 3 的奇数")
+    if isinstance(preprocess["adaptive_c"], bool) or not isinstance(
+        preprocess["adaptive_c"], (int, float)
+    ):
+        raise ConfigError("digit.preprocess.adaptive_c 必须为数值")
+    for key in ("gaussian_kernel", "morph_open", "morph_close"):
+        value = preprocess[key]
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or (value > 0 and value % 2 == 0)
+        ):
+            raise ConfigError(f"digit.preprocess.{key} 必须为 0 或正奇数")
+
+    candidate = data["candidate"]
+    _required(
+        candidate,
+        (
+            "min_area_px",
+            "max_area_px",
+            "min_aspect_ratio",
+            "max_aspect_ratio",
+            "min_height_px",
+            "border_margin_px",
+        ),
+    )
+    for key in ("min_area_px", "max_area_px", "min_aspect_ratio", "max_aspect_ratio"):
+        value = candidate[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(f"digit.candidate.{key} 必须为正数")
+    if candidate["min_area_px"] > candidate["max_area_px"]:
+        raise ConfigError("digit.candidate.min_area_px 不能大于 max_area_px")
+    if candidate["min_aspect_ratio"] > candidate["max_aspect_ratio"]:
+        raise ConfigError("digit.candidate.min_aspect_ratio 不能大于 max_aspect_ratio")
+    for key in ("min_height_px", "border_margin_px"):
+        value = candidate[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ConfigError(f"digit.candidate.{key} 必须为非负整数")
+    if candidate["min_height_px"] <= 0:
+        raise ConfigError("digit.candidate.min_height_px 必须大于 0")
+
+    normalization = data["normalization"]
+    _required(normalization, ("width", "height", "padding_px", "center_by_moments"))
+    for key in ("width", "height", "padding_px"):
+        value = normalization[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ConfigError(f"digit.normalization.{key} 必须为非负整数")
+    if normalization["width"] <= 0 or normalization["height"] <= 0:
+        raise ConfigError("digit.normalization.width/height 必须大于 0")
+    if 2 * normalization["padding_px"] >= min(
+        normalization["width"], normalization["height"]
+    ):
+        raise ConfigError("digit.normalization.padding_px 对目标画布过大")
+    if not isinstance(normalization["center_by_moments"], bool):
+        raise ConfigError("digit.normalization.center_by_moments 必须为布尔值")
+
+    matching = data["matching"]
+    _required(
+        matching,
+        (
+            "template_root",
+            "min_score",
+            "min_score_margin",
+            "iou_weight",
+            "correlation_weight",
+        ),
+    )
+    if not isinstance(matching["template_root"], str) or not matching["template_root"].strip():
+        raise ConfigError("digit.matching.template_root 必须为非空路径")
+    template_root = resolve_config_path(matching["template_root"])
+    if not template_root.is_dir():
+        raise ConfigError(f"数字模板根目录不存在: {template_root}")
+    for key in ("min_score", "min_score_margin", "iou_weight", "correlation_weight"):
+        value = matching[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise ConfigError(f"digit.matching.{key} 必须在 0..1 范围内")
+    if matching["iou_weight"] + matching["correlation_weight"] <= 0:
+        raise ConfigError("digit.matching 的匹配权重之和必须大于 0")
+
+    tracking = data["tracking"]
+    _required(tracking, ("confirm_frames", "lost_frames", "vote_window"))
+    for key in ("confirm_frames", "lost_frames", "vote_window"):
+        value = tracking[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ConfigError(f"digit.tracking.{key} 必须为正整数")
+
+    try:
+        return DigitConfig(**data)
+    except TypeError as exc:
+        raise ConfigError(f"数字配置包含未知或缺失字段: {exc}") from exc
 
 
 def load_steel_ball_config(path: str | Path = "config/steel_ball.yaml") -> SteelBallConfig:

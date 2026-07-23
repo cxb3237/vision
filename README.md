@@ -1,7 +1,7 @@
 # 全国大学生电子设计竞赛小车视觉模块
 
 本工程面向 Raspberry Pi 4B 和普通 Windows/Linux 开发机，使用 USB UVC 摄像头完成
-HSV 颜色检测、传统几何形状检测、直径 10 mm 钢球检测、目标时序跟踪、标定、录像和离线回放。可选的
+HSV 颜色检测、传统几何形状检测、单个印刷数字识别、直径 10 mm 钢球检测、目标时序跟踪、标定、录像和离线回放。可选的
 VMC-Link V1.0 串口链路向 MSPM0G3507 发送视觉结果；MSPM0 始终拥有电机闭环和最终控制权。
 
 当前不包含云台/GPIO 控制、云平台、神经网络数字识别或单目测距。`RECOGNIZE`、`MEASURE`、
@@ -78,6 +78,71 @@ python -m tools.mock_mspm0 --port loop:// --mode track
 ```
 
 所有命令的当前参数以各自的 `--help` 为准。
+
+### 单个印刷数字 0～9 识别
+
+数字检测首版面向白色或浅色背景上的单个黑色印刷数字，不依赖 Tesseract 或大型神经网络。
+`DigitDetector` 会执行候选提取、保持比例归一化、0～9 多模板 IoU/相关系数匹配、分差拒识和
+最近多帧投票。识别结果类别为数字 0～9 对应的 `100～109`，未知数字为 `0`。
+
+1. 分别采集 0～9 模板。按数字键选择标签，`Space/S` 保存，`D` 删除本次最近保存，`Q` 退出。
+每个数字建议至少采集 10 张，覆盖轻微位置、距离、笔画和光照变化：
+
+```bash
+python3 -m tools.capture_digit_templates \
+  --device 0 \
+  --camera-config config/camera.yaml \
+  --digit-config config/digit.yaml \
+  --output-root data/digits/templates
+```
+
+采集模式允许模板目录暂时为空，并会先创建 0～9 子目录；正式 `app.py`、离线回放和调参工具则
+要求 0～9 每类至少有一张可读模板，缺少时会明确列出对应数字，避免静默运行在不可识别状态。
+
+2. 调节阈值、CLAHE、形态学、面积/高度/宽高比、最低分数和最低分差。按 `S` 原子保存，
+按 `R` 从磁盘重载并同步滑动条，按 `Q` 退出：
+
+```bash
+python3 -m tools.digit_tuner \
+  --device 0 \
+  --camera-config config/camera.yaml \
+  --digit-config config/digit.yaml
+```
+
+3. 实时识别：
+
+```bash
+python3 app.py \
+  --mode track \
+  --detector digit \
+  --digit-config config/digit.yaml \
+  --no-serial \
+  --display
+```
+
+4. 先录像以便复现现场问题：
+
+```bash
+python3 -m tools.record_dataset \
+  --output data/recordings/digit_demo.mp4 \
+  --seconds 30
+```
+
+5. 离线回放相同检测器和模板：
+
+```bash
+python3 -m tools.replay_test \
+  --input data/recordings/digit_demo.mp4 \
+  --detector digit \
+  --digit-config config/digit.yaml \
+  --speed 1 \
+  --display
+```
+
+常见问题：候选找不到时先查看二值掩膜并放宽面积、高度或宽高比；`6/9`、`1/7` 混淆时应增加
+对应字体与拍摄姿态的模板，并提高 `min_score_margin`。光照变化优先使用稳定漫射光并开启 CLAHE；
+数字倾斜时补采同角度模板，首版不会自动做透视矫正。每类模板不足 10 张时采集工具会持续提示，
+模板过少通常比单纯降低匹配阈值更容易造成误识别。
 
 ### Linux V4L2 摄像头参数
 

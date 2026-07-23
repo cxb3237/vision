@@ -18,6 +18,7 @@ from core.config_loader import (
     load_camera_config,
     load_calibration_config,
     load_color_config,
+    load_digit_config,
     load_mission_config,
     load_shape_config,
     load_steel_ball_config,
@@ -27,6 +28,7 @@ from core.models import ColorClass, DetectorConfig, VisionResult
 from core.state_machine import VisionMode, VisionStateMachine
 from detectors.base_detector import BaseDetector
 from detectors.color_detector import ColorDetector
+from detectors.digit_detector import DigitDetector
 from detectors.shape_detector import ShapeDetector
 from detectors.steel_ball_detector import SteelBallDetector
 from detectors.target_tracker import TargetTracker
@@ -63,12 +65,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--colors-config", default="config/colors.yaml")
     parser.add_argument("--shapes-config", default="config/shapes.yaml")
     parser.add_argument("--steel-ball-config", default="config/steel_ball.yaml")
+    parser.add_argument("--digit-config", default="config/digit.yaml")
     parser.add_argument("--calibration-config", default="config/calibration.yaml")
     parser.add_argument(
         "--mode",
         choices=("idle", "search", "track", "calibration", "recognize", "measure"),
     )
-    parser.add_argument("--detector", choices=("color", "shape", "steel_ball"))
+    parser.add_argument("--detector", choices=("color", "shape", "steel_ball", "digit"))
     parser.add_argument("--target", help="目标颜色名称")
     parser.add_argument("--video", help="用视频文件或图片目录替代真实摄像头")
     parser.add_argument("--video-loop", action="store_true", help="循环模拟视频源")
@@ -92,8 +95,9 @@ def create_detector(
     shapes_config: str | Path = "config/shapes.yaml",
     steel_ball_config: str | Path = "config/steel_ball.yaml",
     calibration_config: str | Path = "config/calibration.yaml",
+    digit_config: str | Path = "config/digit.yaml",
 ) -> BaseDetector:
-    """创建单帧检测器；应用时序状态统一由 TargetTracker 管理。"""
+    """创建检测器；数字与钢球自行维护专用时序状态。"""
 
     if detector_name == "shape":
         return ShapeDetector(config=load_shape_config(shapes_config))
@@ -101,6 +105,11 @@ def create_detector(
         return SteelBallDetector(
             load_steel_ball_config(steel_ball_config),
             load_calibration_config(calibration_config),
+        )
+    if detector_name == "digit":
+        return DigitDetector(
+            load_digit_config(digit_config),
+            require_complete_templates=True,
         )
     if target not in colors:
         raise ConfigError(f"目标颜色不存在: {target}; 可选: {', '.join(colors)}")
@@ -406,7 +415,7 @@ def run_application(
                     detected = detector.process(frame)
                     result = (
                         detected
-                        if isinstance(detector, SteelBallDetector)
+                        if isinstance(detector, (SteelBallDetector, DigitDetector))
                         else tracker.update(detected)
                     )
                     faults.clear_fault(Fault.DETECTOR_FAILED)
@@ -493,6 +502,7 @@ def main(argv: list[str] | None = None) -> int:
             args.shapes_config,
             args.steel_ball_config,
             args.calibration_config,
+            args.digit_config,
         )
         camera_source = create_camera_source(args, mission)
         serial_enabled = bool(mission["serial_enabled"]) or args.serial or bool(args.serial_port)

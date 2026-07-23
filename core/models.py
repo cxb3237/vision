@@ -168,6 +168,18 @@ class ShapeConfig:
 
 
 @dataclass(slots=True)
+class DigitConfig:
+    """单个印刷数字检测的分组配置。"""
+
+    roi: dict[str, Any]
+    preprocess: dict[str, Any]
+    candidate: dict[str, Any]
+    normalization: dict[str, Any]
+    matching: dict[str, Any]
+    tracking: dict[str, Any]
+
+
+@dataclass(slots=True)
 class SteelBallConfig:
     """直径已知钢球的传统视觉检测参数。"""
 

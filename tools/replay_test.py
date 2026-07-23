@@ -1,4 +1,4 @@
-"""离线回放颜色或形状检测器并输出性能统计。"""
+"""离线回放颜色、形状、钢球或数字检测器并输出性能统计。"""
 
 from __future__ import annotations
 
@@ -12,11 +12,13 @@ import cv2
 from core.config_loader import (
     load_calibration_config,
     load_color_config,
+    load_digit_config,
     load_shape_config,
     load_steel_ball_config,
 )
 from core.models import ColorClass, FramePacket
 from detectors.color_detector import ColorDetector
+from detectors.digit_detector import DigitDetector
 from detectors.shape_detector import ShapeDetector
 from detectors.steel_ball_detector import SteelBallDetector
 
@@ -28,13 +30,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, help="输入视频")
     parser.add_argument(
         "--detector",
-        choices=("color", "shape", "steel_ball"),
+        choices=("color", "shape", "steel_ball", "digit"),
         default="color",
     )
     parser.add_argument("--target", default="red", help="colors.yaml 中的目标颜色")
     parser.add_argument("--config", default="config/colors.yaml", help="颜色配置路径")
     parser.add_argument("--shape-config", default="config/shapes.yaml", help="形状配置路径")
     parser.add_argument("--steel-ball-config", default="config/steel_ball.yaml")
+    parser.add_argument("--digit-config", default="config/digit.yaml")
     parser.add_argument("--calibration-config", default="config/calibration.yaml")
     parser.add_argument("--display", action="store_true", help="显示调试画面")
     parser.add_argument("--speed", type=float, default=1.0, help="相对原视频速度；0 表示最快")
@@ -42,6 +45,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pause", action="store_true", help="启动时暂停")
     parser.add_argument("--output", help="保存带标注的视频")
     return parser
+
+
+def create_detector(args: argparse.Namespace):
+    """按回放参数创建对应检测器，便于无 GUI/无视频单元测试。"""
+
+    if args.detector == "color":
+        colors = load_color_config(args.config)
+        if args.target not in colors:
+            raise ValueError(f"目标颜色不存在: {args.target}; 可选: {', '.join(colors)}")
+        color_class = ColorClass.from_name(args.target)
+        if color_class == ColorClass.UNKNOWN:
+            raise ValueError(f"目标颜色没有稳定协议类别: {args.target}")
+        return ColorDetector(colors[args.target], target_class=int(color_class))
+    if args.detector == "shape":
+        return ShapeDetector(config=load_shape_config(args.shape_config))
+    if args.detector == "digit":
+        return DigitDetector(
+            load_digit_config(args.digit_config),
+            require_complete_templates=True,
+        )
+    return SteelBallDetector(
+        load_steel_ball_config(args.steel_ball_config),
+        load_calibration_config(args.calibration_config),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -66,23 +93,11 @@ def main(argv: list[str] | None = None) -> int:
         input_fps = float(capture.get(cv2.CAP_PROP_FPS))
         if not math.isfinite(input_fps) or input_fps <= 0:
             input_fps = 30.0
-        if args.detector == "color":
-            colors = load_color_config(args.config)
-            if args.target not in colors:
-                print(f"目标颜色不存在: {args.target}; 可选: {', '.join(colors)}")
-                return 2
-            color_class = ColorClass.from_name(args.target)
-            if color_class == ColorClass.UNKNOWN:
-                print(f"目标颜色没有稳定协议类别: {args.target}")
-                return 2
-            detector = ColorDetector(colors[args.target], target_class=int(color_class))
-        elif args.detector == "shape":
-            detector = ShapeDetector(config=load_shape_config(args.shape_config))
-        else:
-            detector = SteelBallDetector(
-                load_steel_ball_config(args.steel_ball_config),
-                load_calibration_config(args.calibration_config),
-            )
+        try:
+            detector = create_detector(args)
+        except ValueError as exc:
+            print(exc)
+            return 2
         detector.initialize()
         if args.output:
             output = Path(args.output)

@@ -1,0 +1,44 @@
+roi:
+  enabled: false
+  x: 0
+  y: 0
+  width: 640
+  height: 480
+
+preprocess:
+  use_clahe: true
+  clahe_clip_limit: 2.0
+  threshold_mode: otsu
+  fixed_threshold: 120
+  adaptive_block_size: 31
+  adaptive_c: 5
+  invert: true
+  gaussian_kernel: 3
+  morph_open: 1
+  morph_close: 3
+
+candidate:
+  min_area_px: 300
+  max_area_px: 200000
+  min_aspect_ratio: 0.15
+  max_aspect_ratio: 1.20
+  min_height_px: 30
+  border_margin_px: 5
+
+normalization:
+  width: 64
+  height: 96
+  padding_px: 6
+  center_by_moments: true
+
+matching:
+  template_root: data/digits/templates
+  min_score: 0.55
+  min_score_margin: 0.06
+  iou_weight: 0.60
+  correlation_weight: 0.40
+
+tracking:
+  confirm_frames: 3
+  lost_frames: 5
+  vote_window: 5
