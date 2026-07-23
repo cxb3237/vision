@@ -61,6 +61,8 @@ class CameraService:
         self._actual_fps = 0.0
         self._actual_fourcc = ""
         self._last_open_log = 0.0
+        self._last_v4l2_requested: dict[str, int] = {}
+        self._last_v4l2_results: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _decode_fourcc(value: float) -> str:
@@ -96,10 +98,20 @@ class CameraService:
         capture.release()
         return None
 
+    def _has_active_v4l2_control(self, name: str) -> bool:
+        profile = self.config.v4l2_controls
+        return bool(
+            profile
+            and profile.get("enabled", False)
+            and profile.get(name) is not None
+        )
+
     def _apply_v4l2_profile(self) -> None:
-        """在采集线程打开设备前应用并回读 Linux V4L2 参数。"""
+        """在采集线程打开 VideoCapture 前应用 Linux V4L2 参数。"""
 
         profile = self.config.v4l2_controls
+        self._last_v4l2_requested = {}
+        self._last_v4l2_results = {}
         if not profile or not profile.get("enabled", False):
             return
         strict = bool(profile.get("strict", False))
@@ -110,17 +122,44 @@ class CameraService:
         }
         if not requested:
             return
+        self._last_v4l2_requested = requested
         LOG.info("准备应用 V4L2 参数 device=%s requested=%s", self.config.device, requested)
-        results = apply_v4l2_controls(self.config.device, requested, strict=strict)
+        self._last_v4l2_results = apply_v4l2_controls(
+            self.config.device,
+            requested,
+            strict=strict,
+        )
+
+    def _read_and_log_v4l2_profile(self) -> None:
+        """在 OpenCV 属性设置完成后回读最终 V4L2 值并校验。"""
+
+        requested = self._last_v4l2_requested
+        if not requested:
+            return
+        profile = self.config.v4l2_controls or {}
+        strict = bool(profile.get("strict", False))
+        results = self._last_v4l2_results
         actual = read_v4l2_controls(self.config.device, list(requested))
         failed = [name for name, result in results.items() if not result["success"]]
+        mismatch = {
+            name: {"requested": value, "actual": actual.get(name)}
+            for name, value in requested.items()
+            if actual.get(name) != value
+            and not results.get(name, {}).get("skipped", False)
+        }
         LOG.info(
-            "V4L2 参数结果 device=%s requested=%s actual=%s failed=%s",
+            "V4L2 最终参数 device=%s requested=%s actual=%s mismatch=%s failed=%s",
             self.config.device,
             requested,
             actual,
+            mismatch,
             failed,
         )
+        if mismatch:
+            message = f"V4L2 最终参数与请求不一致: {mismatch}"
+            if strict:
+                raise V4L2ControlError(message)
+            LOG.warning(message)
 
     def _open_capture(self) -> CaptureLike | None:
         """在采集线程内创建并配置摄像头。"""
@@ -163,25 +202,34 @@ class CameraService:
                     self.config.exposure,
                     "exposure",
                 )
-            self._try_set_property(capture, cv2.CAP_PROP_GAIN, self.config.gain, "gain")
-            self._try_set_property(
-                capture,
-                cv2.CAP_PROP_AUTO_WB,
-                1.0 if self.config.auto_white_balance else 0.0,
-                "auto_white_balance",
-            )
-            self._try_set_property(
-                capture,
-                cv2.CAP_PROP_BRIGHTNESS,
-                self.config.brightness,
-                "brightness",
-            )
-            self._try_set_property(
-                capture,
-                cv2.CAP_PROP_CONTRAST,
-                self.config.contrast,
-                "contrast",
-            )
+            if not self._has_active_v4l2_control("gain"):
+                self._try_set_property(capture, cv2.CAP_PROP_GAIN, self.config.gain, "gain")
+            if not self._has_active_v4l2_control("white_balance_automatic"):
+                self._try_set_property(
+                    capture,
+                    cv2.CAP_PROP_AUTO_WB,
+                    1.0 if self.config.auto_white_balance else 0.0,
+                    "auto_white_balance",
+                )
+            if not self._has_active_v4l2_control("brightness"):
+                self._try_set_property(
+                    capture,
+                    cv2.CAP_PROP_BRIGHTNESS,
+                    self.config.brightness,
+                    "brightness",
+                )
+            if not self._has_active_v4l2_control("contrast"):
+                self._try_set_property(
+                    capture,
+                    cv2.CAP_PROP_CONTRAST,
+                    self.config.contrast,
+                    "contrast",
+                )
+            try:
+                self._read_and_log_v4l2_profile()
+            except Exception:
+                capture.release()
+                raise
             try:
                 actual_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))

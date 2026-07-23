@@ -127,6 +127,28 @@ def test_read_controls_parses_actual_values_without_shell(monkeypatch) -> None:
     assert calls[0]["shell"] is False
 
 
+def test_automatic_control_is_applied_before_manual_value(monkeypatch) -> None:
+    _linux_with_command(monkeypatch)
+    controls_in_order = []
+
+    def fake_run(command, **kwargs):
+        controls_in_order.append(command[-1].split("=", 1)[0])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(v4l2.subprocess, "run", fake_run)
+    v4l2.apply_v4l2_controls(
+        0,
+        {
+            "white_balance_temperature": 5000,
+            "brightness": 0,
+            "white_balance_automatic": 0,
+        },
+    )
+    assert controls_in_order.index("white_balance_automatic") < controls_in_order.index(
+        "white_balance_temperature"
+    )
+
+
 class _FakeCapture:
     def __init__(self, fail_reads: int = 0) -> None:
         self.fail_reads = fail_reads

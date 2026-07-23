@@ -36,6 +36,7 @@ def test_optional_camera_properties_are_none() -> None:
     config = load_camera_config()
     assert config.gain is None
     assert config.exposure is None
+    assert not config.auto_white_balance
 
 
 def test_mission_has_valid_tracker_and_timing_fields() -> None:

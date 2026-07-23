@@ -13,6 +13,16 @@ from typing import Any
 LOG = logging.getLogger(__name__)
 INSTALL_HINT = "未找到 v4l2-ctl；请安装：sudo apt install v4l-utils"
 RESERVED_NAMES = {"enabled", "strict"}
+AUTOMATIC_CONTROL_ORDER = (
+    "white_balance_automatic",
+    "exposure_auto",
+    "focus_auto",
+)
+MANUAL_CONTROL_ORDER = (
+    "white_balance_temperature",
+    "exposure_absolute",
+    "focus_absolute",
+)
 
 
 class V4L2ControlError(RuntimeError):
@@ -41,11 +51,19 @@ def is_v4l2_available() -> bool:
 
 
 def _requested_controls(controls: dict[str, Any]) -> dict[str, int]:
-    return {
+    available = {
         name: int(value)
         for name, value in controls.items()
         if name not in RESERVED_NAMES and value is not None
     }
+    ordered: dict[str, int] = {}
+    for name in (*AUTOMATIC_CONTROL_ORDER, *MANUAL_CONTROL_ORDER):
+        if name in available:
+            ordered[name] = available[name]
+    for name in available:
+        if name not in ordered:
+            ordered[name] = available[name]
+    return ordered
 
 
 def _skipped_results(

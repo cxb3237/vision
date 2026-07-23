@@ -5,9 +5,12 @@ import time
 
 import cv2
 import numpy as np
+import pytest
 
 from core.models import CameraConfig
+import drivers.camera_service as camera_service_module
 from drivers.camera_service import CameraService
+from drivers.v4l2_controls import V4L2ControlError
 
 
 class FakeCapture:
@@ -136,3 +139,116 @@ def test_restart_clears_old_latest_frame_before_new_capture() -> None:
     allow_second_read.set()
     wait_for_frame(service)
     service.stop()
+
+
+def _mock_v4l2(monkeypatch, actual: dict[str, int], events: list[str] | None = None) -> None:
+    def fake_apply(device, controls, strict=False):
+        return {
+            name: {
+                "requested": value,
+                "success": True,
+                "skipped": False,
+                "error": None,
+            }
+            for name, value in controls.items()
+        }
+
+    def fake_read(device, names):
+        if events is not None:
+            events.append("v4l2_read")
+        return {name: actual.get(name) for name in names}
+
+    monkeypatch.setattr(camera_service_module, "apply_v4l2_controls", fake_apply)
+    monkeypatch.setattr(camera_service_module, "read_v4l2_controls", fake_read)
+
+
+def test_v4l2_white_balance_prevents_opencv_auto_wb_override(monkeypatch) -> None:
+    _mock_v4l2(monkeypatch, {"white_balance_automatic": 0})
+    fake = FakeCapture()
+    service = CameraService(
+        CameraConfig(
+            auto_white_balance=True,
+            v4l2_controls={"enabled": True, "white_balance_automatic": 0},
+        ),
+        lambda: fake,
+    )
+    capture = service._open_capture()
+    assert capture is fake
+    assert cv2.CAP_PROP_AUTO_WB not in {item[0] for item in fake.set_calls}
+    fake.release()
+
+
+def test_opencv_auto_wb_is_set_without_v4l2_authority() -> None:
+    fake = FakeCapture()
+    service = CameraService(CameraConfig(auto_white_balance=True), lambda: fake)
+    capture = service._open_capture()
+    assert capture is fake
+    assert (cv2.CAP_PROP_AUTO_WB, 1.0) in fake.set_calls
+    fake.release()
+
+
+def test_v4l2_brightness_prevents_opencv_override(monkeypatch) -> None:
+    _mock_v4l2(monkeypatch, {"brightness": 7})
+    fake = FakeCapture()
+    service = CameraService(
+        CameraConfig(
+            brightness=99,
+            v4l2_controls={"enabled": True, "brightness": 7},
+        ),
+        lambda: fake,
+    )
+    capture = service._open_capture()
+    assert capture is fake
+    assert cv2.CAP_PROP_BRIGHTNESS not in {item[0] for item in fake.set_calls}
+    fake.release()
+
+
+def test_final_v4l2_read_occurs_after_opencv_property_sets(monkeypatch) -> None:
+    events: list[str] = []
+    _mock_v4l2(monkeypatch, {"brightness": 7}, events)
+    fake = FakeCapture()
+    original_set = fake.set
+
+    def recording_set(property_id, value):
+        events.append("opencv_set")
+        return original_set(property_id, value)
+
+    fake.set = recording_set
+    service = CameraService(
+        CameraConfig(v4l2_controls={"enabled": True, "brightness": 7}),
+        lambda: fake,
+    )
+    capture = service._open_capture()
+    assert capture is fake
+    assert events[-1] == "v4l2_read"
+    assert "opencv_set" in events[:-1]
+    fake.release()
+
+
+def test_v4l2_mismatch_warns_when_not_strict(monkeypatch, caplog) -> None:
+    _mock_v4l2(monkeypatch, {"brightness": 8})
+    fake = FakeCapture()
+    service = CameraService(
+        CameraConfig(
+            v4l2_controls={"enabled": True, "strict": False, "brightness": 7}
+        ),
+        lambda: fake,
+    )
+    capture = service._open_capture()
+    assert capture is fake
+    assert "V4L2 最终参数与请求不一致" in caplog.text
+    fake.release()
+
+
+def test_v4l2_mismatch_releases_capture_and_raises_when_strict(monkeypatch) -> None:
+    _mock_v4l2(monkeypatch, {"brightness": 8})
+    fake = FakeCapture()
+    service = CameraService(
+        CameraConfig(
+            v4l2_controls={"enabled": True, "strict": True, "brightness": 7}
+        ),
+        lambda: fake,
+    )
+    with pytest.raises(V4L2ControlError, match="brightness"):
+        service._open_capture()
+    assert fake.release_count == 1

@@ -97,6 +97,8 @@ python3 -m tools.camera_profile_check \
 摄像头拔插或系统重启后，部分 V4L2 参数可能恢复默认值。因此正式程序的 `CameraService` 会在
 第一次打开摄像头、断线重连以及同一服务对象重新启动时自动重新应用配置。Windows 和 macOS
 会安全跳过 V4L2 命令，原有 OpenCV 分辨率、FPS、FOURCC、曝光等设置仍会继续执行。
+当 V4L2 中启用了 gain、brightness、contrast 或自动白平衡控制时，这些项目以 V4L2 为唯一
+权威来源，OpenCV 不会再次写入同一属性；最终回读值不一致时会按 `strict` 选择警告或失败。
 
 ### 直径 10 mm 钢球检测
 
