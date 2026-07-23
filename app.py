@@ -16,9 +16,11 @@ import cv2
 from core.config_loader import (
     ConfigError,
     load_camera_config,
+    load_calibration_config,
     load_color_config,
     load_mission_config,
     load_shape_config,
+    load_steel_ball_config,
 )
 from core.fault_manager import Fault, FaultManager
 from core.models import ColorClass, DetectorConfig, VisionResult
@@ -26,6 +28,7 @@ from core.state_machine import VisionMode, VisionStateMachine
 from detectors.base_detector import BaseDetector
 from detectors.color_detector import ColorDetector
 from detectors.shape_detector import ShapeDetector
+from detectors.steel_ball_detector import SteelBallDetector
 from detectors.target_tracker import TargetTracker
 from drivers.camera_service import CameraService
 from drivers.serial_service import SerialService
@@ -59,11 +62,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-config", default="config/camera.yaml")
     parser.add_argument("--colors-config", default="config/colors.yaml")
     parser.add_argument("--shapes-config", default="config/shapes.yaml")
+    parser.add_argument("--steel-ball-config", default="config/steel_ball.yaml")
+    parser.add_argument("--calibration-config", default="config/calibration.yaml")
     parser.add_argument(
         "--mode",
         choices=("idle", "search", "track", "calibration", "recognize", "measure"),
     )
-    parser.add_argument("--detector", choices=("color", "shape"))
+    parser.add_argument("--detector", choices=("color", "shape", "steel_ball"))
     parser.add_argument("--target", help="目标颜色名称")
     parser.add_argument("--video", help="用视频文件或图片目录替代真实摄像头")
     parser.add_argument("--video-loop", action="store_true", help="循环模拟视频源")
@@ -85,11 +90,18 @@ def create_detector(
     colors: dict[str, dict[str, Any]],
     mission: dict[str, Any],
     shapes_config: str | Path = "config/shapes.yaml",
+    steel_ball_config: str | Path = "config/steel_ball.yaml",
+    calibration_config: str | Path = "config/calibration.yaml",
 ) -> BaseDetector:
     """创建单帧检测器；应用时序状态统一由 TargetTracker 管理。"""
 
     if detector_name == "shape":
         return ShapeDetector(config=load_shape_config(shapes_config))
+    if detector_name == "steel_ball":
+        return SteelBallDetector(
+            load_steel_ball_config(steel_ball_config),
+            load_calibration_config(calibration_config),
+        )
     if target not in colors:
         raise ConfigError(f"目标颜色不存在: {target}; 可选: {', '.join(colors)}")
     color_class = ColorClass.from_name(target)
@@ -148,11 +160,13 @@ class ControlProcessor:
         tracker: TargetTracker,
         supported_target_class: int = 0,
         cache_size: int = 128,
+        reset_callback: Any | None = None,
     ) -> None:
         self.state_machine = state_machine
         self.tracker = tracker
         self.supported_target_class = supported_target_class
         self.cache_size = cache_size
+        self.reset_callback = reset_callback
         self._results: OrderedDict[tuple[int, int], tuple[AckResult, int]] = OrderedDict()
 
     def set_mode(self, mode: VisionMode) -> bool:
@@ -163,6 +177,8 @@ class ControlProcessor:
         if changed and old_mode != self.state_machine.mode:
             if old_mode == VisionMode.TRACK or self.state_machine.mode == VisionMode.TRACK:
                 self.tracker.reset()
+                if self.reset_callback is not None:
+                    self.reset_callback()
         return changed
 
     def process(self, packet_sequence: int, control: VisionControl) -> tuple[AckResult, int]:
@@ -300,7 +316,12 @@ def run_application(
         lost_frames=mission["lost_frames"],
     )
     target_class = int(getattr(detector, "target_class", 0))
-    processor = ControlProcessor(state_machine, tracker, target_class)
+    processor = ControlProcessor(
+        state_machine,
+        tracker,
+        target_class,
+        reset_callback=getattr(detector, "reset", None),
+    )
     faults = FaultManager()
     stop_event = threading.Event()
 
@@ -382,7 +403,12 @@ def run_application(
             if state_machine.mode in (VisionMode.SEARCH, VisionMode.TRACK):
                 process_start = time.monotonic()
                 try:
-                    result = tracker.update(detector.process(frame))
+                    detected = detector.process(frame)
+                    result = (
+                        detected
+                        if isinstance(detector, SteelBallDetector)
+                        else tracker.update(detected)
+                    )
                     faults.clear_fault(Fault.DETECTOR_FAILED)
                 except Exception:
                     faults.set_fault(Fault.DETECTOR_FAILED)
@@ -465,6 +491,8 @@ def main(argv: list[str] | None = None) -> int:
             colors,
             mission,
             args.shapes_config,
+            args.steel_ball_config,
+            args.calibration_config,
         )
         camera_source = create_camera_source(args, mission)
         serial_enabled = bool(mission["serial_enabled"]) or args.serial or bool(args.serial_port)

@@ -1,7 +1,7 @@
 # 全国大学生电子设计竞赛小车视觉模块
 
 本工程面向 Raspberry Pi 4B 和普通 Windows/Linux 开发机，使用 USB UVC 摄像头完成
-HSV 颜色检测、传统几何形状检测、目标时序跟踪、标定、录像和离线回放。可选的
+HSV 颜色检测、传统几何形状检测、直径 10 mm 钢球检测、目标时序跟踪、标定、录像和离线回放。可选的
 VMC-Link V1.0 串口链路向 MSPM0G3507 发送视觉结果；MSPM0 始终拥有电机闭环和最终控制权。
 
 当前不包含云台/GPIO 控制、云平台、神经网络数字识别或单目测距。`RECOGNIZE`、`MEASURE`、
@@ -12,7 +12,7 @@ VMC-Link V1.0 串口链路向 MSPM0G3507 发送视觉结果；MSPM0 始终拥有
 
 - `core/`：共享模型、YAML 配置校验、视觉模式和线程安全故障位。
 - `drivers/`：只保留最新帧的摄像头线程和有限队列串口线程。
-- `detectors/`：HSV 颜色检测、传统形状检测和目标跟踪器。
+- `detectors/`：HSV 颜色、传统形状、钢球检测和目标跟踪器。
 - `protocol/`：CRC-16/CCITT-FALSE、VMC-Link 消息和流式解析器。
 - `tools/`：探测、去重录制、回放、HSV 调参、标定、去畸变和模拟器。
 - `config/`：摄像头、颜色、形状、任务和标定参数。
@@ -52,6 +52,11 @@ python -m tools.hsv_tuner --image data/samples/test.jpg --color red --range-inde
 # --speed 1 是原速，0 是最快处理；空格或 p 暂停，n 单帧前进
 python -m tools.replay_test --input data/recordings/test.mp4 --detector color --target red --speed 1 --display
 
+# 直径 10 mm 钢球实时检测、调参和离线回放
+python app.py --mode track --detector steel_ball --display --no-serial
+python -m tools.steel_ball_tuner --device 0 --config config/steel_ball.yaml
+python -m tools.replay_test --input data/recordings/steel_ball.mp4 --detector steel_ball --display
+
 # 无串口运行；视频源不循环时会在文件结束后自动退出
 python app.py --mode search --detector color --target red --no-serial
 python app.py --mode track --video data/recordings/test.mp4 --display --no-serial
@@ -67,6 +72,43 @@ python -m tools.mock_mspm0 --port loop:// --mode track
 ```
 
 所有命令的当前参数以各自的 `--help` 为准。
+
+### 直径 10 mm 钢球检测
+
+`SteelBallDetector` 使用 `config/steel_ball.yaml` 配置 ROI、CLAHE、滤波、固定/自适应阈值、
+正反二值化、形态学、像素直径、面积、圆度、宽高比和可选 Hough 圆复核。它自行维护
+`CANDIDATE`、`LOCKED`、`OCCLUDED`、`LOST` 和远处重新捕获状态，不直接访问摄像头或串口。
+
+实时检测：
+
+```bash
+python app.py --mode track --detector steel_ball --display --no-serial
+```
+
+实时调参会复用 `CameraService`，显示原图、增强灰度图、二值掩膜和最终候选。按 `S` 原子保存
+到 `config/steel_ball.yaml`，按 `Q` 退出：
+
+```bash
+python -m tools.steel_ball_tuner \
+  --device 0 \
+  --camera-config config/camera.yaml \
+  --config config/steel_ball.yaml \
+  --calibration-config config/calibration.yaml
+```
+
+离线回放：
+
+```bash
+python -m tools.replay_test \
+  --input data/recordings/steel_ball.mp4 \
+  --detector steel_ball \
+  --steel-ball-config config/steel_ball.yaml \
+  --calibration-config config/calibration.yaml \
+  --display
+```
+
+当 `calibration.yaml` 已标定且焦距 `fx` 有效时，距离按
+`fx × known_diameter_mm / diameter_px` 估算；未标定或像素直径无效时协议值为 `0xFFFF`。
 
 ### 交互式标定图片采集
 

@@ -9,10 +9,16 @@ import time
 
 import cv2
 
-from core.config_loader import load_color_config, load_shape_config
+from core.config_loader import (
+    load_calibration_config,
+    load_color_config,
+    load_shape_config,
+    load_steel_ball_config,
+)
 from core.models import ColorClass, FramePacket
 from detectors.color_detector import ColorDetector
 from detectors.shape_detector import ShapeDetector
+from detectors.steel_ball_detector import SteelBallDetector
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -20,10 +26,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(description="回放视频并验证视觉检测器")
     parser.add_argument("--input", required=True, help="输入视频")
-    parser.add_argument("--detector", choices=("color", "shape"), default="color")
+    parser.add_argument(
+        "--detector",
+        choices=("color", "shape", "steel_ball"),
+        default="color",
+    )
     parser.add_argument("--target", default="red", help="colors.yaml 中的目标颜色")
     parser.add_argument("--config", default="config/colors.yaml", help="颜色配置路径")
     parser.add_argument("--shape-config", default="config/shapes.yaml", help="形状配置路径")
+    parser.add_argument("--steel-ball-config", default="config/steel_ball.yaml")
+    parser.add_argument("--calibration-config", default="config/calibration.yaml")
     parser.add_argument("--display", action="store_true", help="显示调试画面")
     parser.add_argument("--speed", type=float, default=1.0, help="相对原视频速度；0 表示最快")
     parser.add_argument("--loop", action="store_true", help="循环回放")
@@ -64,8 +76,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"目标颜色没有稳定协议类别: {args.target}")
                 return 2
             detector = ColorDetector(colors[args.target], target_class=int(color_class))
-        else:
+        elif args.detector == "shape":
             detector = ShapeDetector(config=load_shape_config(args.shape_config))
+        else:
+            detector = SteelBallDetector(
+                load_steel_ball_config(args.steel_ball_config),
+                load_calibration_config(args.calibration_config),
+            )
         detector.initialize()
         if args.output:
             output = Path(args.output)

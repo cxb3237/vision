@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from core.models import CalibrationConfig, CameraConfig, ShapeConfig
+from core.models import CalibrationConfig, CameraConfig, ShapeConfig, SteelBallConfig
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -169,8 +169,8 @@ def load_mission_config(
         "calibration",
     }:
         raise ConfigError("default_mode 必须是当前已实现的 idle/search/track/calibration")
-    if data["detector"] not in {"color", "shape"}:
-        raise ConfigError("detector 必须是 color 或 shape")
+    if data["detector"] not in {"color", "shape", "steel_ball"}:
+        raise ConfigError("detector 必须是 color、shape 或 steel_ball")
     for key in (
         "confirm_frames",
         "lost_frames",
@@ -281,3 +281,65 @@ def load_shape_config(path: str | Path = "config/shapes.yaml") -> ShapeConfig:
         return ShapeConfig(**data)
     except TypeError as exc:
         raise ConfigError(f"形状配置包含未知字段: {exc}") from exc
+
+
+def load_steel_ball_config(path: str | Path = "config/steel_ball.yaml") -> SteelBallConfig:
+    """读取并严格校验钢球检测配置。"""
+
+    data = _read(path)
+    try:
+        config = SteelBallConfig(**data)
+    except TypeError as exc:
+        raise ConfigError(f"钢球配置包含未知或缺失字段: {exc}") from exc
+    if config.roi is not None:
+        if (
+            not isinstance(config.roi, list)
+            or len(config.roi) != 4
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in config.roi)
+            or config.roi[2] <= 0
+            or config.roi[3] <= 0
+        ):
+            raise ConfigError("steel_ball.roi 必须为 null 或 [x, y, width, height] 正整数尺寸")
+    if config.known_diameter_mm <= 0:
+        raise ConfigError("known_diameter_mm 必须为正数")
+    if not 0 <= config.target_class <= 0xFFFF:
+        raise ConfigError("target_class 必须在 0..65535 范围内")
+    if config.threshold_mode not in {"fixed", "adaptive"}:
+        raise ConfigError("threshold_mode 必须是 fixed 或 adaptive")
+    if not 0 <= config.threshold <= 255:
+        raise ConfigError("threshold 必须在 0..255 范围内")
+    if config.adaptive_block_size < 3:
+        raise ConfigError("adaptive_block_size 必须至少为 3")
+    for name in ("gaussian_kernel", "morph_open", "morph_close"):
+        if getattr(config, name) < 0:
+            raise ConfigError(f"{name} 不能为负数")
+    positive_fields = (
+        "clahe_clip_limit",
+        "clahe_tile_grid_size",
+        "min_diameter_px",
+        "max_diameter_px",
+        "min_area_px",
+        "max_area_px",
+        "confirm_frames",
+        "lost_frames",
+        "max_jump_px",
+        "hough_dp",
+        "hough_min_dist",
+        "hough_param1",
+        "hough_param2",
+    )
+    for name in positive_fields:
+        value = getattr(config, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(f"{name} 必须为正数")
+    if config.min_diameter_px > config.max_diameter_px:
+        raise ConfigError("min_diameter_px 不能大于 max_diameter_px")
+    if config.min_area_px > config.max_area_px:
+        raise ConfigError("min_area_px 不能大于 max_area_px")
+    if not 0 < config.min_circularity <= 1:
+        raise ConfigError("min_circularity 必须在 (0, 1] 范围内")
+    if not 0 < config.min_aspect_ratio <= config.max_aspect_ratio:
+        raise ConfigError("钢球宽高比范围无效")
+    if config.hough_min_radius < 0 or config.hough_max_radius < config.hough_min_radius:
+        raise ConfigError("Hough 半径范围无效")
+    return config

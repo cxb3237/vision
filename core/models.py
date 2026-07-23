@@ -164,3 +164,40 @@ class ShapeConfig:
     approximation_factor: float = 0.04
     square_ratio_tolerance: float = 0.15
     circle_threshold: float = 0.70
+
+
+@dataclass(slots=True)
+class SteelBallConfig:
+    """直径已知钢球的传统视觉检测参数。"""
+
+    roi: list[int] | None = None
+    known_diameter_mm: float = 10.0
+    target_class: int = 100
+    clahe_enabled: bool = True
+    clahe_clip_limit: float = 2.0
+    clahe_tile_grid_size: int = 8
+    gaussian_kernel: int = 5
+    threshold_mode: str = "fixed"
+    threshold: int = 120
+    adaptive_block_size: int = 21
+    adaptive_c: float = 5.0
+    invert: bool = False
+    morph_open: int = 3
+    morph_close: int = 5
+    min_diameter_px: float = 12.0
+    max_diameter_px: float = 120.0
+    min_area_px: float = 80.0
+    max_area_px: float = 12_000.0
+    min_circularity: float = 0.72
+    min_aspect_ratio: float = 0.75
+    max_aspect_ratio: float = 1.33
+    confirm_frames: int = 3
+    lost_frames: int = 5
+    max_jump_px: float = 160.0
+    hough_enabled: bool = False
+    hough_dp: float = 1.2
+    hough_min_dist: float = 20.0
+    hough_param1: float = 100.0
+    hough_param2: float = 20.0
+    hough_min_radius: int = 5
+    hough_max_radius: int = 80
