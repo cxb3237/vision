@@ -165,6 +165,10 @@ def load_mission_config(
     """读取并校验主程序实际使用的任务配置。"""
 
     data = _apply(_read(path), overrides)
+    data.setdefault("serial_send_rate_hz", data.get("vision_result_hz", 20))
+    data.setdefault("serial_reconnect_interval_s", 1.0)
+    data.setdefault("serial_queue_size", 64)
+    data.setdefault("serial_strict", False)
     required = (
         "default_mode",
         "detector",
@@ -180,6 +184,10 @@ def load_mission_config(
         "serial_enabled",
         "serial_port",
         "serial_baudrate",
+        "serial_send_rate_hz",
+        "serial_reconnect_interval_s",
+        "serial_queue_size",
+        "serial_strict",
         "heartbeat_hz",
         "vision_result_hz",
         "display",
@@ -203,10 +211,19 @@ def load_mission_config(
         "serial_link_timeout_ms",
         "statistics_interval_s",
         "serial_baudrate",
+        "serial_send_rate_hz",
+        "serial_reconnect_interval_s",
+        "serial_queue_size",
         "heartbeat_hz",
         "vision_result_hz",
     ):
         _positive_number(data, key)
+    if not isinstance(data["serial_queue_size"], int) or isinstance(
+        data["serial_queue_size"], bool
+    ):
+        raise ConfigError("serial_queue_size 必须为正整数")
+    if not isinstance(data["serial_strict"], bool):
+        raise ConfigError("serial_strict 必须为布尔值")
     alpha = data["smoothing_alpha"]
     if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not 0 < alpha <= 1:
         raise ConfigError("smoothing_alpha 必须在 (0, 1] 范围内")

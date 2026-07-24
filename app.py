@@ -41,7 +41,6 @@ from protocol.vmc_messages import (
     Heartbeat,
     MessageType,
     VisionControl,
-    VisionTarget,
 )
 from protocol.vmc_protocol import VmcPacket
 from tools.mock_camera import MockCamera
@@ -78,6 +77,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--display", action="store_true", help="显示画面；q/s/i/t 可操作")
     parser.add_argument("--serial", action="store_true", help="明确启用串口")
     parser.add_argument("--serial-port", help="覆盖串口并同时启用串口")
+    parser.add_argument("--baudrate", type=int, help="覆盖串口波特率")
+    parser.add_argument("--serial-rate", type=float, help="覆盖视觉结果发送频率 Hz")
+    parser.add_argument("--serial-debug", action="store_true", help="记录发送包十六进制")
     parser.add_argument("--no-serial", action="store_true", help="完全禁用串口硬件")
     parser.add_argument(
         "--log-level",
@@ -138,6 +140,48 @@ def create_camera_source(args: argparse.Namespace, mission: dict[str, Any]):
         loop = args.video_loop or bool(mission["video_loop"])
         return MockCamera(args.video, loop=loop)
     return CameraService(load_camera_config(args.camera_config))
+
+
+def resolve_serial_settings(
+    args: argparse.Namespace,
+    mission: dict[str, Any],
+) -> dict[str, Any]:
+    """合并串口配置；命令行优先，视频回放必须显式启用串口。"""
+
+    explicit = bool(getattr(args, "serial", False)) or bool(
+        getattr(args, "serial_port", None)
+    )
+    enabled = explicit or (
+        bool(mission["serial_enabled"]) and not bool(getattr(args, "video", None))
+    )
+    if bool(getattr(args, "no_serial", False)):
+        enabled = False
+    requested_baudrate = getattr(args, "baudrate", None)
+    requested_send_rate = getattr(args, "serial_rate", None)
+    baudrate = (
+        mission["serial_baudrate"]
+        if requested_baudrate is None
+        else requested_baudrate
+    )
+    send_rate = (
+        mission["serial_send_rate_hz"]
+        if requested_send_rate is None
+        else requested_send_rate
+    )
+    if baudrate <= 0:
+        raise ConfigError("baudrate 必须为正整数")
+    if send_rate <= 0:
+        raise ConfigError("serial-rate 必须为正数")
+    return {
+        "enabled": enabled,
+        "port": getattr(args, "serial_port", None) or mission["serial_port"],
+        "baudrate": int(baudrate),
+        "send_rate_hz": float(send_rate),
+        "reconnect_delay": float(mission["serial_reconnect_interval_s"]),
+        "queue_size": int(mission["serial_queue_size"]),
+        "strict": bool(mission["serial_strict"]),
+        "serial_debug": bool(getattr(args, "serial_debug", False)),
+    }
 
 
 def is_peer_alive(
@@ -311,6 +355,8 @@ def run_application(
     detector: BaseDetector,
     camera_source,
     serial_service: SerialService,
+    detector_id: str | int = 0,
+    camera_calibrated: bool = False,
 ) -> int:
     """运行主循环；所有启动操作均受 finally 和成功标志保护。"""
 
@@ -340,12 +386,10 @@ def run_application(
     old_sigint = signal.signal(signal.SIGINT, request_stop)
     old_sigterm = signal.signal(signal.SIGTERM, request_stop)
     started = time.monotonic()
-    last_result_sent = float("-inf")
     last_heartbeat = float("-inf")
     last_statistics = started
     last_frame_seen = started
     last_frame_id: int | None = None
-    target_sequence = 0
     service_sequence = 0
     processed = 0
     process_time_total = 0.0
@@ -360,6 +404,8 @@ def run_application(
         serial_started = serial_service.enabled
         while not stop_event.is_set():
             now = time.monotonic()
+            if hasattr(serial_service, "raise_if_failed"):
+                serial_service.raise_if_failed()
             service_sequence = _handle_control_messages(
                 serial_service,
                 processor,
@@ -424,18 +470,12 @@ def run_application(
                     LOG.exception("检测器处理失败")
                 process_time_total += time.monotonic() - process_start
                 processed += 1
-                if (
-                    result is not None
-                    and now - last_result_sent >= 1.0 / mission["vision_result_hz"]
-                ):
-                    serial_service.send_packet(
-                        MessageType.VISION_TARGET,
-                        int(Flags.STREAM),
-                        target_sequence,
-                        VisionTarget.from_result(result, int(state_machine.mode)).pack(),
+                if result is not None:
+                    serial_service.publish_result(
+                        result,
+                        detector_id,
+                        camera_calibrated=camera_calibrated,
                     )
-                    target_sequence = (target_sequence + 1) & 0xFF
-                    last_result_sent = now
             annotated = None
             if display:
                 keep_running, annotated = _handle_display(
@@ -505,15 +545,22 @@ def main(argv: list[str] | None = None) -> int:
             args.digit_config,
         )
         camera_source = create_camera_source(args, mission)
-        serial_enabled = bool(mission["serial_enabled"]) or args.serial or bool(args.serial_port)
-        if args.no_serial:
-            serial_enabled = False
+        serial_settings = resolve_serial_settings(args, mission)
         serial_service = SerialService(
-            args.serial_port or mission["serial_port"],
-            mission["serial_baudrate"],
-            enabled=serial_enabled,
+            serial_settings.pop("port"),
+            serial_settings.pop("baudrate"),
+            **serial_settings,
         )
-        return run_application(args, mission, detector, camera_source, serial_service)
+        calibration = load_calibration_config(args.calibration_config)
+        return run_application(
+            args,
+            mission,
+            detector,
+            camera_source,
+            serial_service,
+            detector_id=args.detector or mission["detector"],
+            camera_calibrated=calibration.calibrated,
+        )
     except (ConfigError, ValueError, OSError) as exc:
         LOG.error("启动失败: %s", exc)
         return 2

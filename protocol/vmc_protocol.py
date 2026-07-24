@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from protocol.crc16 import crc16_ccitt_false
+from protocol.vmc_link import (
+    VMCLinkParser,
+    VMCLinkResult,
+    decode_result_packet,
+    encode_result_packet,
+)
 
 
 SOF = b"\xAA\x55"

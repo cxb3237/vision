@@ -6,6 +6,10 @@ lost_frames: 5
 serial_enabled: false
 serial_port: /dev/serial0
 serial_baudrate: 115200
+serial_send_rate_hz: 20
+serial_reconnect_interval_s: 1.0
+serial_queue_size: 64
+serial_strict: false
 heartbeat_hz: 10
 vision_result_hz: 20
 display: false

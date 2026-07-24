@@ -281,14 +281,102 @@ OpenCV 属性编号 14 是 `CAP_PROP_GAIN`。部分 UVC 摄像头不支持手动
 
 串口默认关闭，默认端口为 `/dev/serial0`。可在 `config/mission.yaml` 启用，使用 `--serial`
 显式启用，或使用 `--serial-port` 覆盖端口并同时启用；`--no-serial` 优先级最高，会确保程序
-完全不访问串口硬件。端口打开只表示 `port_open`，程序依据最近收到的有效对端包判断
+完全不访问串口硬件。`--baudrate`、`--serial-rate` 和 `--serial-debug` 分别覆盖波特率、固定
+结果包发送频率和十六进制调试日志。视频文件回放默认禁用真实串口，只有显式传入 `--serial`
+或 `--serial-port` 才会启用。端口打开只表示 `port_open`，程序依据最近收到的有效对端包判断
 `peer_alive` 和 `SERIAL_LINK_DOWN`。
 
-串口发送将 ACK/URGENT 放入关键队列，普通消息批量发送，流式 `VISION_TARGET` 只保留最新包。
+串口发送将 ACK/URGENT 放入关键队列，普通消息批量发送；VMC-Link v1固定结果通道只保留最新
+一帧，并由串口线程按默认20Hz发送，因此摄像头和检测主循环不会等待串口写操作。
 `VISION_CONTROL` 只有带 `ACK_REQ` 时才要求回复。重复的 `SEQ + request_id` 返回缓存结果，不会
 再次切换模式或重置 Tracker。
 
-## VMC-Link V1.0 冻结负载
+## VMC-Link v1 固定视觉结果协议
+
+树莓派向MSPM0发送的视觉结果固定为34字节。所有多字节整数均为小端；CRC使用
+CRC-16/CCITT-FALSE（多项式`0x1021`、初值`0xFFFF`、xorout `0x0000`），计算范围为偏移2的
+`version`至偏移31的`flags`，不包括帧头和CRC字段。
+
+| 偏移 | 长度 | 类型 | 字段 | 约定 |
+| ---: | ---: | --- | --- | --- |
+| 0 | 1 | uint8 | SOF1 | `0xAA` |
+| 1 | 1 | uint8 | SOF2 | `0x55` |
+| 2 | 1 | uint8 | version | `1` |
+| 3 | 1 | uint8 | msg_type | `0x01` |
+| 4 | 1 | uint8 | payload_length | `27` |
+| 5 | 2 | uint16 | sequence | 每个实际发送包加1，`65535→0` |
+| 7 | 4 | uint32 | timestamp_ms | 采集时间毫秒 |
+| 11 | 1 | uint8 | detector_id | none/color/shape/steel_ball/digit=`0/1/2/3/4` |
+| 12 | 1 | uint8 | state | NONE/CANDIDATE/LOCKED/OCCLUDED/LOST=`0/1/2/3/4` |
+| 13 | 2 | uint16 | target_class | 沿用检测器类别；数字为`100～109` |
+| 15 | 2 | int16 | center_x_px | 无目标为`-1` |
+| 17 | 2 | int16 | center_y_px | 无目标为`-1` |
+| 19 | 2 | int16 | error_x_permille | 相对画面中心，裁剪至`-1000～1000` |
+| 21 | 2 | int16 | error_y_permille | 下正上负，裁剪至`-1000～1000` |
+| 23 | 2 | uint16 | bbox_width_px | 无目标为`0` |
+| 25 | 2 | uint16 | bbox_height_px | 无目标为`0` |
+| 27 | 2 | uint16 | confidence_permille | `0～1000` |
+| 29 | 2 | uint16 | distance_mm | 未知为`65535` |
+| 31 | 1 | uint8 | flags | bit0发现、bit1锁定、bit2距离有效、bit3已标定 |
+| 32 | 2 | uint16 | crc16 | 小端CRC |
+
+项目内部`TargetState`的枚举顺序保持不变，编码层会显式转换为上述线上状态。未发现目标时仍会
+发送对应的NONE、OCCLUDED或LOST状态，同时清零类别、bbox、置信度和误差。
+
+`config/mission.yaml`中的串口相关配置为：
+
+```yaml
+serial_enabled: false
+serial_port: /dev/serial0
+serial_baudrate: 115200
+serial_send_rate_hz: 20
+serial_reconnect_interval_s: 1.0
+serial_queue_size: 64
+serial_strict: false
+```
+
+`serial_queue_size`只用于双向控制、ACK和普通消息的收发队列。固定视觉结果不进入这些FIFO；
+它始终通过`_latest_result`单槽只保存最新一帧，因此即使MSPM0暂时读取变慢，也不会积压旧结果
+或拖慢检测线程。
+
+实时发送示例：
+
+```bash
+python3 app.py --mode track --detector color --target red \
+  --serial-port /dev/ttyUSB0 --baudrate 115200 --serial-rate 20
+```
+
+### 串口连接与调试
+
+USB转串口适配器通常显示为`/dev/ttyUSB0`或`/dev/ttyACM0`；可用`ls -l /dev/serial/by-id/`
+找到更稳定的设备名。GPIO UART可使用树莓派物理引脚8（GPIO14/TXD）连接MSPM0 RX，物理引脚10
+（GPIO15/RXD）连接MSPM0 TX，物理引脚6连接GND。TX/RX必须交叉、两板必须共地，并且只能使用
+3.3V逻辑电平。可通过`sudo raspi-config`启用UART并关闭串口登录控制台。
+
+协议自检和监视命令：
+
+```bash
+python3 -m tools.vmc_link_selftest
+python3 -m tools.serial_monitor --simulate
+python3 -m tools.serial_monitor --port /dev/ttyUSB0 --baudrate 115200
+```
+
+MSPM0端可直接移植`mcu_reference/vmc_link.c`和`vmc_link.h`。该解析器无动态内存，适合在UART
+接收中断中逐字节调用，或在DMA回调中遍历新增字节；接线与调用示例见
+`mcu_reference/README.md`。
+
+常见问题：
+
+- 权限不足：执行`sudo usermod -aG dialout $USER`后重新登录，不要长期用root绕过权限。
+- 设备名变化：优先使用`/dev/serial/by-id/`链接，或配置udev固定名称。
+- CRC错误或乱码：确认两端都是115200、8-N-1，且没有把文本日志写入同一UART。
+- 持续收不到包：确认TX/RX已经交叉、两端共地、UART已启用且使用3.3V电平。
+- 偶发断开：查看供电和USB线，服务会按`serial_reconnect_interval_s`自动重连。
+
+## 兼容的双向控制负载
+
+工程原有的可变长控制帧接口继续保留，用于心跳、ACK和`VISION_CONTROL`，不会影响固定34字节
+视觉结果编码器和解析器：
 
 | 负载 | 格式 | 字节数 |
 | --- | --- | ---: |

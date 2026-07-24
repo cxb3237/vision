@@ -12,6 +12,13 @@ from typing import Any
 
 from protocol.vmc_messages import Flags, MessageType
 from protocol.vmc_protocol import VmcPacket, VmcStreamParser, encode_packet
+from protocol.vmc_link import (
+    DetectorID,
+    VMCLinkResult,
+    encode_result_packet,
+    result_to_vmc_link,
+)
+from core.models import VisionResult
 
 
 LOG = logging.getLogger(__name__)
@@ -31,10 +38,19 @@ class SerialService:
         read_timeout: float = 0.01,
         write_timeout: float = 0.1,
         send_batch_size: int = 64,
+        send_rate_hz: float = 20.0,
+        strict: bool = False,
+        serial_debug: bool = False,
     ) -> None:
+        if queue_size <= 0:
+            raise ValueError("queue_size 必须为正整数")
+        if send_rate_hz <= 0:
+            raise ValueError("send_rate_hz 必须为正数")
         self.port = port
         self.baudrate = baudrate
         self.enabled = enabled
+        self.strict = strict
+        self.serial_debug = serial_debug
         self._serial_factory = serial_factory
         self._reconnect_delay = reconnect_delay
         self._read_timeout = read_timeout
@@ -45,11 +61,19 @@ class SerialService:
         self._serial_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._startup_event = threading.Event()
+        self._startup_error: BaseException | None = None
+        self._fatal_error: BaseException | None = None
         self._receive_queue: queue.Queue[VmcPacket] = queue.Queue(maxsize=queue_size)
         self._critical_queue: queue.Queue[bytes] = queue.Queue(maxsize=queue_size)
         self._send_queue: queue.Queue[bytes] = queue.Queue(maxsize=queue_size)
         self._stream_lock = threading.Lock()
         self._latest_stream: bytes | None = None
+        self._result_lock = threading.Lock()
+        self._latest_result: VMCLinkResult | None = None
+        self._result_sequence = 0
+        self._send_rate_hz = float(send_rate_hz)
+        self._next_result_send = 0.0
         self._parser = VmcStreamParser()
         self._stats_lock = threading.Lock()
         self._reconnects = 0
@@ -59,6 +83,7 @@ class SerialService:
         self._rx_queue_drops = 0
         self._tx_queue_drops = 0
         self._stream_replacements = 0
+        self._result_replacements = 0
         self._last_rx_monotonic: float | None = None
         self._last_valid_packet_monotonic: float | None = None
         self._last_heartbeat_monotonic: float | None = None
@@ -78,7 +103,14 @@ class SerialService:
         self._drain(self._send_queue)
         with self._stream_lock:
             self._latest_stream = None
+        with self._result_lock:
+            self._latest_result = None
+            self._result_sequence = 0
+            self._next_result_send = 0.0
         self._parser = VmcStreamParser()
+        self._startup_event.clear()
+        self._startup_error = None
+        self._fatal_error = None
         with self._stats_lock:
             self._last_rx_monotonic = None
             self._last_valid_packet_monotonic = None
@@ -96,6 +128,12 @@ class SerialService:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, name="serial-io", daemon=True)
         self._thread.start()
+        if self.strict:
+            self._startup_event.wait(max(2.0, self._reconnect_delay + 0.5))
+            if self._startup_error is not None:
+                error = self._startup_error
+                self.stop()
+                raise RuntimeError(f"严格模式下串口打开失败: {error}") from error
 
     def _factory_kwargs(self) -> dict[str, float]:
         kwargs = {"timeout": self._read_timeout}
@@ -158,6 +196,17 @@ class SerialService:
             return self._critical_queue.get_nowait()
         except queue.Empty:
             pass
+        now = time.monotonic()
+        with self._result_lock:
+            if self._latest_result is not None and now >= self._next_result_send:
+                result = self._latest_result.with_sequence(self._result_sequence)
+                self._latest_result = None
+                self._result_sequence = (self._result_sequence + 1) & 0xFFFF
+                self._next_result_send = now + 1.0 / self._send_rate_hz
+                data = encode_result_packet(result, sequence=result.sequence)
+                if self.serial_debug:
+                    LOG.info("VMC-Link TX seq=%d %s", result.sequence, data.hex(" "))
+                return data
         try:
             return self._send_queue.get_nowait()
         except queue.Empty:
@@ -204,11 +253,19 @@ class SerialService:
                             self._serial = opened
                         with self._stats_lock:
                             self._port_opened_monotonic = time.monotonic()
+                        self._startup_event.set()
                         LOG.info("串口已打开: %s @ %d", self.port, self.baudrate)
                     except Exception as exc:
                         with self._stats_lock:
                             self._reconnects += 1
                         LOG.warning("串口打开失败: %s", exc)
+                        if not self._startup_event.is_set():
+                            self._startup_error = exc
+                            self._startup_event.set()
+                        if self.strict:
+                            self._fatal_error = exc
+                            self._stop_event.set()
+                            break
                         self._stop_event.wait(self._reconnect_delay)
                         continue
                 with self._serial_lock:
@@ -229,8 +286,13 @@ class SerialService:
                     with self._stats_lock:
                         self._reconnects += 1
                         self._port_opened_monotonic = None
+                    if self.strict:
+                        self._fatal_error = exc
+                        self._stop_event.set()
+                        break
                     self._stop_event.wait(self._reconnect_delay)
         finally:
+            self._startup_event.set()
             self._close_owned_serial()
 
     def stop(self, timeout: float = 2.0) -> None:
@@ -287,6 +349,36 @@ class SerialService:
             LOG.warning("串口%s队列已满", "关键" if target_queue is self._critical_queue else "发送")
             return False
 
+    def publish_result(
+        self,
+        result: VisionResult,
+        detector_id: str | int | DetectorID,
+        *,
+        camera_calibrated: bool = False,
+    ) -> bool:
+        """非阻塞提交最新视觉结果；旧的未发送结果会被覆盖。"""
+
+        if not self.enabled or not self.is_running() or self._stop_event.is_set():
+            return False
+        snapshot = result_to_vmc_link(
+            result,
+            sequence=0,
+            detector_id=detector_id,
+            camera_calibrated=camera_calibrated,
+        )
+        with self._result_lock:
+            if self._latest_result is not None:
+                with self._stats_lock:
+                    self._result_replacements += 1
+            self._latest_result = snapshot
+        return True
+
+    def raise_if_failed(self) -> None:
+        """严格模式下把后台串口错误传播给主循环。"""
+
+        if self.strict and self._fatal_error is not None:
+            raise RuntimeError(f"严格模式串口故障: {self._fatal_error}") from self._fatal_error
+
     def get_message(self, timeout: float = 0.0) -> VmcPacket | None:
         """获取一个已解析消息；超时返回 ``None``。"""
 
@@ -319,6 +411,8 @@ class SerialService:
                 "rx_queue_drops": self._rx_queue_drops,
                 "tx_queue_drops": self._tx_queue_drops,
                 "stream_replacements": self._stream_replacements,
+                "result_replacements": self._result_replacements,
+                "result_sequence": self._result_sequence,
                 "critical_queue_size": self._critical_queue.qsize(),
                 "send_queue_size": self._send_queue.qsize(),
             }

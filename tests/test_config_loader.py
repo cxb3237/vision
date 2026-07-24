@@ -43,6 +43,17 @@ def test_mission_has_valid_tracker_and_timing_fields() -> None:
     mission = load_mission_config()
     assert mission["max_jump_px"] > 0
     assert 0 < mission["smoothing_alpha"] <= 1
+    assert mission["serial_queue_size"] == 64
+
+
+def test_legacy_mission_without_serial_queue_size_falls_back_to_64(tmp_path) -> None:
+    data = yaml.safe_load((config_loader.PROJECT_ROOT / "config/mission.yaml").read_text(
+        encoding="utf-8"
+    ))
+    data.pop("serial_queue_size")
+    path = tmp_path / "mission.yaml"
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    assert load_mission_config(path)["serial_queue_size"] == 64
 
 
 def test_invalid_calibrated_matrix_is_rejected(tmp_path) -> None:

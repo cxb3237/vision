@@ -5,7 +5,7 @@ import threading
 import time
 
 from drivers.serial_service import SerialService
-from protocol.vmc_messages import Ack, Flags, Heartbeat, MessageType
+from protocol.vmc_messages import Ack, Flags, Heartbeat, MessageType, VisionControl
 from protocol.vmc_protocol import VmcStreamParser, encode_packet
 
 
@@ -184,3 +184,47 @@ def test_stopped_service_rejects_old_outbound_packets() -> None:
     service.start()
     service.stop()
     assert not service.send_packet(MessageType.HEARTBEAT, payload=bytes(12))
+
+
+def _control_burst(count: int) -> bytes:
+    return b"".join(
+        encode_packet(
+            MessageType.VISION_CONTROL,
+            int(Flags.ACK_REQ),
+            sequence,
+            VisionControl(sequence, 1).pack(),
+        )
+        for sequence in range(count)
+    )
+
+
+def test_six_control_packets_fit_default_receive_queue_without_drops() -> None:
+    fake = FakeSerial(_control_burst(6))
+    service = SerialService(
+        "fake",
+        queue_size=64,
+        serial_factory=lambda *_args, **_kwargs: fake,
+    )
+    service.start()
+    wait_until(lambda: service.get_statistics()["rx_good_count"] == 6)
+    statistics = service.get_statistics()
+    packets = [service.get_message() for _ in range(6)]
+    service.stop()
+    assert statistics["rx_queue_drops"] == 0
+    assert [packet.sequence for packet in packets if packet is not None] == list(range(6))
+
+
+def test_small_receive_queue_still_drops_oldest_and_keeps_latest() -> None:
+    fake = FakeSerial(_control_burst(6))
+    service = SerialService(
+        "fake",
+        queue_size=2,
+        serial_factory=lambda *_args, **_kwargs: fake,
+    )
+    service.start()
+    wait_until(lambda: service.get_statistics()["rx_good_count"] == 6)
+    statistics = service.get_statistics()
+    packets = [service.get_message(), service.get_message()]
+    service.stop()
+    assert statistics["rx_queue_drops"] == 4
+    assert [packet.sequence for packet in packets if packet is not None] == [4, 5]
