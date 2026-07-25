@@ -12,6 +12,7 @@ def test_systemd_template_uses_placeholders_and_safe_stop() -> None:
     assert "WorkingDirectory=@PROJECT_DIR@" in text
     assert "@PROJECT_DIR@/.venv/bin/python" in text
     assert "KillSignal=SIGINT" in text and "RestartSec=" in text
+    assert "Restart=on-failure" in text and "Restart=always" not in text
     assert "--detector digit" not in text
     assert "C:\\" not in text and "/home/" not in text
 
@@ -30,6 +31,12 @@ def test_kiosk_is_local_only_and_waits_for_health() -> None:
     assert "localhost" in text and "eval" not in text
     assert "/healthz" in text and "--kiosk" in text
     assert "chromium-browser" in text and "https://" not in text
+    assert "google-chrome" in text and "google-chrome-stable" in text
+    assert "firefox" in text
+    assert "kiosk.pid" in text and "mktemp" in text and "mv -f" in text
+    assert '--user-data-dir="$CHROME_PROFILE"' in text
+    assert 'CHROME_PROFILE="$RUNTIME_DIR/chrome-profile"' in text
+    assert "--no-sandbox" not in text
 
 
 def test_installer_passes_validated_touch_url_as_environment_variable() -> None:

@@ -4,79 +4,125 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>Vision Field Console</title>
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=2">
 </head>
 <body>
-  <header>
-    <div><span class="eyebrow">RPI VISION</span><h1>现场调试台</h1></div>
-    <div id="runningBadge" class="badge offline">STOPPED</div>
-  </header>
-
-  <main id="debugView">
-    <section class="preview-card">
+  <div id="appShell">
+    <section id="previewPane" class="preview-pane" aria-label="实时摄像头预览">
       <img id="preview" src="/api/preview.mjpg" alt="实时标注画面">
-      <div class="preview-strip">
-        <span>CAM <b id="cameraOnline">OFF</b></span>
-        <span>UART <b id="serialOnline">OFF</b></span>
+      <div class="preview-overlay">
+        <span id="overlayDetector">—</span>
+        <strong id="overlayTarget">—</strong>
+        <span id="overlayState">NONE</span>
         <span>FPS <b id="fps">0.0</b></span>
-        <span>TX <b id="txCount">0</b></span>
       </div>
     </section>
 
-    <section class="telemetry-card">
-      <div class="metric hero"><label>识别类别</label><strong id="targetClass">—</strong></div>
-      <div class="metric"><label>检测器</label><strong id="detector">—</strong></div>
-      <div class="metric"><label>状态</label><strong id="state">NONE</strong></div>
-      <div class="metric"><label>置信度</label><strong id="confidence">0</strong></div>
-      <div class="metric"><label>中心</label><strong id="center">-1, -1</strong></div>
-      <div class="metric"><label>误差</label><strong id="error">0, 0</strong></div>
-      <div class="metric"><label>模式</label><strong id="mode">—</strong></div>
-      <div class="metric"><label>现场参数</label><strong id="modified">基准</strong></div>
-      <div class="error-line" id="lastError">无错误</div>
-    </section>
+    <aside id="sideDock" class="side-dock">
+      <header class="dock-header">
+        <div class="dock-title"><span class="eyebrow">RPI VISION</span><h1>现场调试台</h1></div>
+        <button id="drawerHandle" class="icon-button drawer-handle" aria-label="打开摄像头参数" aria-expanded="false">
+          <span>‹</span>
+        </button>
+        <button id="maintenanceButton" class="icon-button maintenance-button" aria-label="长按打开维护菜单">
+          <span>⋮</span><i id="maintenanceProgress"></i>
+        </button>
+      </header>
 
-    <section class="controls-card">
-      <h2>检测器</h2>
-      <div class="button-grid">
-        <button data-detector="digit">数字识别</button>
-        <button data-detector="color">颜色识别</button>
-        <button data-detector="shape">形状识别</button>
-        <button data-detector="steel_ball">钢球识别</button>
+      <div id="normalDock" class="dock-content">
+        <div class="status-tags">
+          <span id="runningBadge" class="status-tag offline">STOPPED</span>
+          <span id="cameraBadge" class="status-tag offline">CAM OFFLINE</span>
+          <span id="serialBadge" class="status-tag offline">UART OFFLINE</span>
+          <span id="vmcBadge" class="status-tag warning">VMC TX IDLE</span>
+          <span id="lockBadge" class="status-tag">NONE</span>
+          <span id="dirtyBadge" class="status-tag">CLEAN</span>
+          <span id="competitionBadge" class="status-tag">DEBUG</span>
+        </div>
+
+        <dl class="telemetry-lines">
+          <div><dt>Detector</dt><dd id="detector">—</dd></div>
+          <div><dt>Target</dt><dd id="targetClass">—</dd></div>
+          <div><dt>Confidence</dt><dd id="confidence">0</dd></div>
+          <div><dt>VMC-Link TX</dt><dd id="txCount">0</dd></div>
+          <div><dt>Mode</dt><dd id="mode">—</dd></div>
+          <div><dt>Center</dt><dd id="center">-1, -1</dd></div>
+        </dl>
+
+        <div id="lastError" class="error-line">无错误</div>
+
+        <section class="dock-section">
+          <h2>检测器</h2>
+          <div class="button-grid detector-grid">
+            <button data-detector="digit">数字</button>
+            <button data-detector="color">颜色</button>
+            <button data-detector="shape">形状</button>
+            <button data-detector="steel_ball">钢球</button>
+          </div>
+        </section>
+
+        <section class="dock-section compact-actions">
+          <button id="showCamera" class="primary">摄像头参数</button>
+          <button id="enterCompetition" class="danger">进入比赛模式</button>
+        </section>
       </div>
-      <h2>现场操作</h2>
-      <div class="button-grid actions">
-        <button id="showCamera">摄像头参数</button>
-        <button id="saveRuntime">保存现场参数</button>
-        <button id="restoreLast">恢复上次有效参数</button>
-        <button id="restoreBaseline">恢复基准参数</button>
-        <button id="enterCompetition" class="danger">进入比赛模式</button>
+
+      <div id="competitionDock" class="competition-dock" hidden>
+        <span class="competition-running">COMPETITION</span>
+        <dl class="telemetry-lines competition-lines">
+          <div><dt>Detector</dt><dd id="cDetector">—</dd></div>
+          <div><dt>Target</dt><dd id="cClass">—</dd></div>
+          <div><dt>State</dt><dd id="cState">NONE</dd></div>
+          <div><dt>Confidence</dt><dd id="cConfidence">0</dd></div>
+          <div><dt>FPS</dt><dd id="cFps">0</dd></div>
+          <div><dt>CAM / UART</dt><dd id="cLinks">OFF / OFF</dd></div>
+        </dl>
+        <p>长按右上角维护按钮可退出比赛模式、kiosk或视觉服务。</p>
+      </div>
+
+      <section id="cameraPanel" class="camera-drawer" aria-hidden="true">
+        <header class="drawer-header">
+          <div><span class="eyebrow">CAMERA PROFILE</span><h2>摄像头参数</h2></div>
+          <div class="profile-line">当前配置：<strong id="currentProfile">读取中</strong></div>
+          <button id="closeCamera" class="icon-button" aria-label="关闭参数面板">×</button>
+        </header>
+        <div id="cameraControls" class="camera-controls-scroll"></div>
+        <footer class="drawer-footer">
+          <button id="saveRuntime" class="primary">保存现场参数</button>
+          <button id="restoreLast">恢复上次有效参数</button>
+          <button id="restoreBaseline" class="danger">恢复基准参数</button>
+          <div id="operationResult" class="operation-result">尚无参数操作</div>
+        </footer>
+      </section>
+    </aside>
+  </div>
+
+  <div id="maintenanceMenu" class="modal-backdrop" hidden>
+    <section class="maintenance-menu" role="dialog" aria-modal="true" aria-labelledby="maintenanceTitle">
+      <h2 id="maintenanceTitle">维护菜单</h2>
+      <p>危险操作需要再次确认。</p>
+      <button id="reloadPage">重新加载页面</button>
+      <button id="maintenanceExitCompetition">退出比赛模式</button>
+      <button id="exitKiosk" class="danger">退出全屏界面</button>
+      <button id="stopRuntime" class="danger solid">停止视觉程序</button>
+      <button id="closeMaintenance">取消</button>
+    </section>
+  </div>
+
+  <div id="confirmDialog" class="modal-backdrop" hidden>
+    <section class="confirm-dialog" role="alertdialog" aria-modal="true">
+      <h2 id="confirmTitle">确认操作</h2>
+      <p id="confirmMessage"></p>
+      <div class="confirm-actions">
+        <button id="confirmCancel">取消</button>
+        <button id="confirmAccept" class="danger solid">确认</button>
       </div>
     </section>
+  </div>
 
-    <section class="camera-card" id="cameraPanel">
-      <div class="section-title"><h2>摄像头参数</h2><button id="closeCamera">关闭</button></div>
-      <p class="hint">请求通过视觉线程应用；灰色项表示当前摄像头或平台不支持。</p>
-      <div id="cameraControls"></div>
-    </section>
-  </main>
-
-  <main id="competitionView" hidden>
-    <section class="competition-card">
-      <div class="running">RUNNING</div>
-      <div class="competition-grid">
-        <div><label>检测器</label><strong id="cDetector">—</strong></div>
-        <div><label>类别</label><strong id="cClass">—</strong></div>
-        <div><label>状态</label><strong id="cState">NONE</strong></div>
-        <div><label>置信度</label><strong id="cConfidence">0</strong></div>
-        <div><label>FPS</label><strong id="cFps">0</strong></div>
-        <div><label>摄像头 / 串口</label><strong id="cLinks">OFF / OFF</strong></div>
-      </div>
-      <button id="exitCompetition">长按3秒退出比赛模式</button>
-      <div id="holdProgress"></div>
-    </section>
-  </main>
-
-  <div id="toast" role="status"></div>
-  <script src="/app.js"></script>
+  <div id="stoppedOverlay" class="stopped-overlay" hidden>视觉服务已停止</div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/control_scheduler.js?v=3"></script>
+  <script src="/app.js?v=3"></script>
 </body>
 </html>

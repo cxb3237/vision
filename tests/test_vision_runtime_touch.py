@@ -8,7 +8,9 @@ import json
 from pathlib import Path
 import threading
 import time
-from urllib.request import urlopen
+from types import MappingProxyType
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import cv2
 import numpy as np
@@ -403,6 +405,84 @@ def test_restore_exposure_order_depends_on_target_auto_state(tmp_path, monkeypat
     assert calls[:2] == [("exposure_absolute", 120), ("exposure_auto", 3)]
 
 
+@pytest.mark.parametrize(
+    ("command_type", "target_values"),
+    [
+        (
+            CommandType.RESTORE_BASELINE,
+            {
+                "brightness": 0,
+                "gain": 7,
+                "white_balance_automatic": 0,
+                "white_balance_temperature": 5000,
+                "exposure_auto": 1,
+                "exposure_absolute": 120,
+            },
+        ),
+        (
+            CommandType.RESTORE_LAST_GOOD,
+            {
+                "brightness": 6,
+                "gain": 9,
+                "white_balance_automatic": 0,
+                "white_balance_temperature": 4800,
+                "exposure_auto": 1,
+                "exposure_absolute": 160,
+            },
+        ),
+    ],
+)
+def test_restore_rebuild_source_has_requested_actual_and_clean_state(
+    tmp_path, monkeypatch, command_type, target_values
+) -> None:
+    runtime = _runtime(tmp_path)
+    current = {name: value + 1 for name, value in target_values.items()}
+    runtime.state_store.update(
+        camera_controls={
+            name: {
+                "name": name,
+                "supported": True,
+                "minimum": 0,
+                "maximum": 10000,
+                "step": 1,
+                "requested": value,
+                "actual": value,
+                "mismatch": False,
+            }
+            for name, value in current.items()
+        },
+        runtime_modified=True,
+    )
+    runtime._runtime_overrides = dict(current)
+    runtime._modified_controls = set(current)
+
+    def fake_apply(_device, controls, strict=False):
+        name, value = next(iter(controls.items()))
+        current[name] = value
+        return {name: {"success": True, "error": None}}
+
+    monkeypatch.setattr(runtime_module, "apply_v4l2_controls", fake_apply)
+    monkeypatch.setattr(
+        runtime_module,
+        "read_v4l2_controls",
+        lambda _device, names: {name: current[name] for name in names},
+    )
+    if command_type == CommandType.RESTORE_BASELINE:
+        runtime.baseline_controls = MappingProxyType(dict(target_values))
+    else:
+        runtime.persistence.save_camera_override(target_values)
+
+    command = RuntimeCommand.create(command_type)
+    runtime.state_store.add_command(command)
+    runtime._execute_command(command)
+    camera = runtime.get_runtime_config_snapshot()
+    for name, value in target_values.items():
+        assert camera["controls"][name]["requested"] == value
+        assert camera["controls"][name]["actual"] == value
+    assert not camera["modified"]
+    assert runtime.state_store.command_snapshot(command.command_id)["status"] == "APPLIED"
+
+
 def test_camera_reconnect_reapplies_runtime_overrides(tmp_path, monkeypatch) -> None:
     runtime = _runtime(tmp_path)
     runtime._runtime_overrides = {"brightness": 30}
@@ -434,6 +514,7 @@ class ServerRuntime:
     def __init__(self) -> None:
         self.frame_stream = LatestFrameStream()
         self.state = {"runtime_running": True, "competition_mode": False}
+        self.stop_requests = 0
 
     def get_status_snapshot(self):
         return dict(self.state)
@@ -446,6 +527,9 @@ class ServerRuntime:
 
     def submit_command(self, *_args, **_kwargs):
         return "id"
+
+    def request_stop(self):
+        self.stop_requests += 1
 
 
 def test_web_server_never_creates_video_capture_and_disconnect_is_harmless(
@@ -465,3 +549,66 @@ def test_web_server_never_creates_video_capture_and_disconnect_is_harmless(
         payload = json.loads(response.read())
     server.stop()
     assert payload["ok"] and runtime.state["runtime_running"]
+
+
+def _post_json(url: str, body: dict):
+    request = Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=2) as response:
+        return response.status, json.loads(response.read())
+
+
+def test_runtime_stop_endpoint_is_parameterless_and_idempotent(tmp_path) -> None:
+    runtime = ServerRuntime()
+    config = replace(_touch_config(tmp_path), host="127.0.0.1", port=0)
+    server = TouchUIServer(runtime, config)
+    server.start()
+    port = server._server.server_address[1]
+    status, first = _post_json(f"http://127.0.0.1:{port}/api/runtime/stop", {})
+    _, second = _post_json(f"http://127.0.0.1:{port}/api/runtime/stop", {})
+    deadline = time.monotonic() + 1
+    while runtime.stop_requests == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    server.stop()
+    assert status == 202 and first["status"] == "STOPPING"
+    assert second["status"] == "ALREADY_STOPPING"
+    assert runtime.stop_requests == 1
+
+
+def test_runtime_stop_and_kiosk_exit_reject_client_commands_or_pid(tmp_path) -> None:
+    runtime = ServerRuntime()
+    config = replace(_touch_config(tmp_path), host="127.0.0.1", port=0)
+    server = TouchUIServer(runtime, config)
+    server.start()
+    port = server._server.server_address[1]
+    for endpoint, body in (
+        ("/api/runtime/stop", {"command": "shutdown"}),
+        ("/api/kiosk/exit", {"pid": 1}),
+    ):
+        with pytest.raises(HTTPError) as raised:
+            _post_json(f"http://127.0.0.1:{port}{endpoint}", body)
+        assert raised.value.code == 400
+    server.stop()
+
+
+def test_runtime_stop_closes_enabled_camera_and_serial_once(tmp_path) -> None:
+    class EnabledSerial(FakeSerial):
+        enabled = True
+
+    camera = FakeCamera(finished=False)
+    serial = EnabledSerial()
+    runtime = _runtime(tmp_path, camera=camera, serial=serial, touch=False)
+    thread = threading.Thread(target=runtime.run_forever)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while camera.start_count == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    runtime.request_stop()
+    runtime.request_stop()
+    thread.join(1)
+    assert not thread.is_alive()
+    assert camera.stop_count == 1 and serial.stop_count == 1

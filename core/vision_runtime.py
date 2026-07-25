@@ -438,6 +438,11 @@ class VisionRuntime:
 
     def _execute_command(self, command: RuntimeCommand) -> None:
         self.state_store.set_command_status(command.command_id, CommandStatus.APPLYING)
+        if command.command_type in {
+            CommandType.RESTORE_LAST_GOOD,
+            CommandType.RESTORE_BASELINE,
+        }:
+            LOG.info("参数恢复请求开始: %s id=%s", command.command_type.value, command.command_id)
         try:
             if (
                 self.state_store.snapshot().get("competition_mode")
@@ -511,6 +516,11 @@ class VisionRuntime:
                 self._set_competition(False)
             self.state_store.update(last_error="")
             self.state_store.set_command_status(command.command_id, CommandStatus.APPLIED)
+            if command.command_type in {
+                CommandType.RESTORE_LAST_GOOD,
+                CommandType.RESTORE_BASELINE,
+            }:
+                LOG.info("参数恢复成功: %s id=%s", command.command_type.value, command.command_id)
         except Exception as exc:
             message = str(exc)
             self.state_store.update(last_error=message)

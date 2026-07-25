@@ -8,10 +8,12 @@ import json
 import logging
 from pathlib import Path
 import threading
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
 from touch_ui.api import TouchAPI, api_error
+from touch_ui.kiosk import KioskExitError, exit_kiosk
 from touch_ui.models import CommandType, TouchUIConfig
 
 
@@ -26,6 +28,27 @@ class TouchUIServer:
         self.web_root = (web_root or Path(__file__).resolve().parents[1] / "touch_ui_web").resolve()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._stop_request_lock = threading.Lock()
+        self._stop_requested = False
+
+    def _claim_runtime_stop(self) -> bool:
+        with self._stop_request_lock:
+            if self._stop_requested:
+                return False
+            self._stop_requested = True
+            return True
+
+    def _trigger_runtime_stop(self) -> None:
+        def request_after_response() -> None:
+            time.sleep(0.01)
+            LOG.warning("维护菜单已确认停止视觉程序")
+            self.runtime.request_stop()
+
+        threading.Thread(
+            target=request_after_response,
+            name="touch-ui-stop-request",
+            daemon=True,
+        ).start()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -95,6 +118,7 @@ class TouchUIServer:
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(data)
 
@@ -115,6 +139,8 @@ class TouchUIServer:
                         self._static("index.html", "text/html; charset=utf-8")
                     elif path == "/app.js":
                         self._static("app.js", "application/javascript; charset=utf-8")
+                    elif path == "/control_scheduler.js":
+                        self._static("control_scheduler.js", "application/javascript; charset=utf-8")
                     elif path == "/style.css":
                         self._static("style.css", "text/css; charset=utf-8")
                     else:
@@ -169,6 +195,35 @@ class TouchUIServer:
                 try:
                     if path == "/api/detector/select":
                         self._json(*owner.api.select_detector(self._body()))
+                    elif path == "/api/kiosk/exit":
+                        body = self._body()
+                        if body:
+                            self._json(*api_error(400, "INVALID_BODY", "退出kiosk不接受PID或命令参数"))
+                            return
+                        try:
+                            pid = exit_kiosk(owner.config.runtime_directory / "kiosk.pid")
+                        except KioskExitError as exc:
+                            LOG.warning("浏览器PID验证失败: %s", exc)
+                            self._json(*api_error(409, "KIOSK_EXIT_REJECTED", str(exc)))
+                        else:
+                            self._json(200, {"ok": True, "status": "EXITING", "pid": pid})
+                    elif path == "/api/runtime/stop":
+                        body = self._body()
+                        if body:
+                            self._json(*api_error(400, "INVALID_BODY", "停止视觉程序不接受命令参数"))
+                            return
+                        scheduled = owner._claim_runtime_stop()
+                        try:
+                            self._json(
+                                202,
+                                {
+                                    "ok": True,
+                                    "status": "STOPPING" if scheduled else "ALREADY_STOPPING",
+                                },
+                            )
+                        finally:
+                            if scheduled:
+                                owner._trigger_runtime_stop()
                     elif path in routes:
                         self._body()
                         self._json(*owner.api.command(routes[path]))

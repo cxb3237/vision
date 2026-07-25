@@ -402,6 +402,11 @@ MSPM0端可直接移植`mcu_reference/vmc_link.c`和`vmc_link.h`。该解析器�
 投递请求，不会创建第二个摄像头或直接执行V4L2操作。前端为项目内的原生HTML/CSS/JavaScript，
 无CDN、Node.js、数据库或互联网依赖。
 
+界面采用固定`100dvh`的一屏布局：横屏左侧始终显示完整、等比例的摄像头预览，右侧为紧凑状态
+与参数side dock；竖屏时预览在上、dock在下。页面主体不滚动，参数列表只在dock内部滚动。参数
+把手位于dock固定标题栏的独立48×48按钮槽内，点击或向左/向右拖动超过约40%可打开/关闭抽屉；
+打开和关闭时都不会覆盖状态文字、参数按钮或摄像头有效区域。
+
 ### 安装与手动启动
 
 在Raspberry Pi 5项目目录内创建虚拟环境并安装已有依赖：
@@ -449,8 +454,13 @@ python3 app.py \
 实际值，再由`config/camera.yaml`中明确配置的值覆盖形成基准。恢复成功后停用override，基础YAML
 本身保持不变；因此即使`gain`等控制未写入基础YAML，也能恢复到程序启动时的实际值。
 
+保存、恢复上次有效参数和恢复基准参数都会等待后端命令进入`APPLIED`，再重新读取
+`GET /api/config/camera`并完整重建滑动条状态；`requested`、`actual`、范围、步进、支持状态和
+`MISMATCH`不会沿用恢复前的浏览器本地对象。命令进入`FAILED`时保留当前界面值并显示后端错误。
+
 比赛模式隐藏全部参数控件并由后端拒绝普通修改请求，摄像头、检测和VMC-Link继续运行。触摸屏需
-长按退出按钮3秒；该持续时间由`config/touch_ui.yaml`控制。比赛模式用于防误触，不是身份认证。
+长按右上角维护按钮约2秒才能打开维护菜单，比赛模式下入口仍保留。退出比赛模式、退出kiosk和
+停止视觉服务都需要二次确认；普通点击不会执行危险操作。比赛模式用于防误触，不是身份认证。
 
 ### systemd和kiosk自动启动
 
@@ -469,6 +479,19 @@ sudo bash deploy/install_touch_ui.sh \
 脚本不会执行YAML中的任意文本。组权限重新登录后生效。kiosk脚本等待配置端口的`/healthz`，
 再启动Chromium；浏览器退出后自动重启。桌面自动登录涉及现场
 安全策略，脚本不会擅自开启，请在Raspberry Pi图形桌面设置中手动启用目标普通用户的自动登录。
+
+`start_kiosk.sh`依次查找Chromium、Chrome和Firefox，并把浏览器PID原子写入
+`runtime/kiosk.pid`。Chrome/Chromium额外使用项目专用的`runtime/chrome-profile`，不会复用或
+修改用户普通Chrome配置，也能避免PID只指向短暂启动器。维护菜单“退出全屏界面”调用固定的
+`POST /api/kiosk/exit`：后端只接受该
+PID文件，验证当前用户、浏览器名称和`--kiosk`参数后发送`SIGTERM`，客户端不能提交PID或任意
+命令。显式退出会写入退出标记，因此脚本不会立即重启浏览器；下次桌面登录或重新执行脚本仍会
+正常打开。
+
+维护菜单“停止视觉程序”调用无参数的`POST /api/runtime/stop`。响应发回页面后，运行时异步请求
+安全停止，由`VisionRuntime.stop`按既有生命周期释放预览线程、串口和唯一CameraService，正常
+退出码为0。systemd使用`Restart=on-failure`：崩溃会重启，UI正常停止不会立即重启，系统下次
+开机仍会因服务已enable而启动。
 
 systemd模板不写死检测器。启动检测器按“命令行明确值 > `runtime/touch_ui_state.yaml`保存值 >
 `config/touch_ui.yaml`的`startup.detector`”选择。最终检测器为`digit`时，安装脚本要求

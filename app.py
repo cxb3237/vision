@@ -489,7 +489,8 @@ def run_application(
     finally:
         if touch_server is not None:
             touch_server.stop()
-        runtime.stop()
+        if getattr(runtime, "_started", False):
+            runtime.stop()
         if old_sigint is not None:
             signal.signal(signal.SIGINT, old_sigint)
         if old_sigterm is not None:
