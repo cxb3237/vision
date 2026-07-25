@@ -68,6 +68,11 @@ def exit_kiosk(
     if system != "Linux":
         raise KioskExitError(f"当前平台不支持退出kiosk: {system}")
     path = Path(pid_file)
+    marker = path.with_name("kiosk.exit_requested")
+    try:
+        _write_exit_marker(marker)
+    except OSError as exc:
+        raise KioskExitError(f"无法创建kiosk退出请求: {exc}") from exc
     pid = _read_pid(path)
     process_dir = Path(process_root) / str(pid)
     try:
@@ -82,13 +87,23 @@ def exit_kiosk(
     executable = Path(arguments[0]).name.lower() if arguments else ""
     if executable not in _BROWSER_NAMES or "--kiosk" not in arguments:
         raise KioskExitError(f"PID={pid}不是受支持的Chrome/Chromium/Firefox kiosk进程")
-
-    marker = path.with_name("kiosk.exit")
+    expected_profile = (path.parent / "chrome-profile").resolve()
+    has_project_profile = any(
+        argument.startswith("--user-data-dir=")
+        and Path(argument.split("=", 1)[1]).resolve() == expected_profile
+        for argument in arguments
+    )
+    has_local_url = any(
+        value.startswith("http://127.0.0.1:")
+        or value.startswith("http://localhost:")
+        for argument in arguments
+        for value in (argument.removeprefix("--app="),)
+    )
+    if not has_project_profile and not has_local_url:
+        raise KioskExitError(f"PID={pid}不属于本项目专用profile或本地kiosk URL")
     try:
-        _write_exit_marker(marker)
         kill_process(pid, signal.SIGTERM)
     except OSError as exc:
-        marker.unlink(missing_ok=True)
         LOG.warning("kiosk退出失败 PID=%s: %s", pid, exc)
         raise KioskExitError(f"发送SIGTERM失败 PID={pid}: {exc}") from exc
     LOG.warning("已确认并请求退出kiosk PID=%s", pid)

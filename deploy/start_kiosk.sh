@@ -7,8 +7,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 RUNTIME_DIR="$PROJECT_DIR/runtime"
 PID_FILE="$RUNTIME_DIR/kiosk.pid"
-EXIT_MARKER="$RUNTIME_DIR/kiosk.exit"
+EXIT_REQUESTED="$RUNTIME_DIR/kiosk.exit_requested"
 CHROME_PROFILE="$RUNTIME_DIR/chrome-profile"
+MAX_RESTARTS="${VISION_KIOSK_MAX_RESTARTS:-5}"
+RESTART_DELAY="${VISION_KIOSK_RESTART_DELAY:-2}"
+
+mkdir -p "$RUNTIME_DIR"
+rm -f -- "$EXIT_REQUESTED"
 
 url_address="${VISION_TOUCH_URL#http://}"
 url_host="${url_address%%:*}"
@@ -46,9 +51,11 @@ until curl --fail --silent --max-time 2 "$VISION_TOUCH_URL/healthz" >/dev/null; 
   sleep 1
 done
 
-mkdir -p "$RUNTIME_DIR"
-rm -f -- "$EXIT_MARKER"
 browser_pid=""
+if [[ ! "$MAX_RESTARTS" =~ ^[0-9]+$ ]] || [[ ! "$RESTART_DELAY" =~ ^[0-9]+$ ]]; then
+  echo "VISION_KIOSK_MAX_RESTARTS和VISION_KIOSK_RESTART_DELAY必须为非负整数" >&2
+  exit 5
+fi
 
 cleanup_pid() {
   if [[ -n "$browser_pid" && -f "$PID_FILE" ]]; then
@@ -59,7 +66,16 @@ cleanup_pid() {
   fi
 }
 trap cleanup_pid EXIT
-trap 'exit 0' INT TERM
+
+stop_session() {
+  if [[ "$browser_pid" =~ ^[0-9]+$ ]] && kill -0 "$browser_pid" 2>/dev/null; then
+    kill -TERM "$browser_pid" 2>/dev/null || true
+    wait "$browser_pid" 2>/dev/null || true
+  fi
+  cleanup_pid
+  exit 0
+}
+trap stop_session INT TERM
 
 write_pid_atomically() {
   local pid="$1"
@@ -71,7 +87,8 @@ write_pid_atomically() {
 }
 
 echo "触摸服务已就绪，启动kiosk。维护菜单可安全退出浏览器或视觉服务。"
-while true; do
+restart_count=0
+while ((restart_count <= MAX_RESTARTS)); do
   browser_name="$(basename -- "$BROWSER")"
   if [[ "$browser_name" == "firefox" ]]; then
     "$BROWSER" --kiosk "$VISION_TOUCH_URL" &
@@ -95,14 +112,24 @@ while true; do
     echo "无法原子写入kiosk PID文件" >&2
     exit 4
   fi
-  wait "$browser_pid" 2>/dev/null || true
+  wait "$browser_pid" 2>/dev/null
+  browser_status="$?"
   cleanup_pid
   browser_pid=""
-  if [[ -f "$EXIT_MARKER" ]]; then
-    rm -f -- "$EXIT_MARKER"
+  if [[ -f "$EXIT_REQUESTED" ]]; then
+    rm -f -- "$EXIT_REQUESTED"
     echo "已按维护菜单请求退出kiosk；下次桌面登录或手动执行脚本时可重新打开。"
     exit 0
   fi
-  echo "浏览器意外退出，2秒后重新启动。" >&2
-  sleep 2
+  if [[ "$browser_status" -eq 0 || "$browser_status" -eq 130 || "$browser_status" -eq 143 ]]; then
+    echo "kiosk浏览器已正常关闭；视觉后端继续运行。"
+    exit 0
+  fi
+  restart_count=$((restart_count + 1))
+  if ((restart_count > MAX_RESTARTS)); then
+    echo "kiosk浏览器连续异常退出，已达到最大重试次数${MAX_RESTARTS}，停止重启。" >&2
+    exit "$browser_status"
+  fi
+  echo "浏览器异常退出（code=$browser_status），${RESTART_DELAY}秒后进行第${restart_count}次重试。" >&2
+  sleep "$RESTART_DELAY"
 done

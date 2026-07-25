@@ -18,6 +18,7 @@ import pytest
 
 import app
 import core.vision_runtime as runtime_module
+import touch_ui.server as touch_server_module
 from app import ControlProcessor, _handle_control_messages, _handle_display, _save_debug_frame
 from core.config_loader import ConfigError, load_camera_config, load_mission_config
 from core.models import FramePacket, TargetState, VisionResult
@@ -593,6 +594,19 @@ def test_runtime_stop_and_kiosk_exit_reject_client_commands_or_pid(tmp_path) -> 
             _post_json(f"http://127.0.0.1:{port}{endpoint}", body)
         assert raised.value.code == 400
     server.stop()
+
+
+def test_kiosk_exit_does_not_stop_vision_backend(tmp_path, monkeypatch) -> None:
+    runtime = ServerRuntime()
+    config = replace(_touch_config(tmp_path), host="127.0.0.1", port=0)
+    monkeypatch.setattr(touch_server_module, "exit_kiosk", lambda _path: 4321)
+    server = TouchUIServer(runtime, config)
+    server.start()
+    port = server._server.server_address[1]
+    status, body = _post_json(f"http://127.0.0.1:{port}/api/kiosk/exit", {})
+    server.stop()
+    assert status == 200 and body["status"] == "EXITING"
+    assert runtime.stop_requests == 0
 
 
 def test_runtime_stop_closes_enabled_camera_and_serial_once(tmp_path) -> None:

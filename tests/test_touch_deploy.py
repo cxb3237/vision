@@ -34,6 +34,9 @@ def test_kiosk_is_local_only_and_waits_for_health() -> None:
     assert "google-chrome" in text and "google-chrome-stable" in text
     assert "firefox" in text
     assert "kiosk.pid" in text and "mktemp" in text and "mv -f" in text
+    assert "kiosk.exit_requested" in text
+    assert "while true" not in text
+    assert "MAX_RESTARTS" in text and "browser_status" in text
     assert '--user-data-dir="$CHROME_PROFILE"' in text
     assert 'CHROME_PROFILE="$RUNTIME_DIR/chrome-profile"' in text
     assert "--no-sandbox" not in text

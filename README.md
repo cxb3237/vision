@@ -477,16 +477,19 @@ sudo bash deploy/install_touch_ui.sh \
 `vision-touch.service`，把普通用户加入`video`和`dialout`组，启用systemd服务并生成带独立
 `VISION_TOUCH_URL`环境变量的XDG桌面自启动文件。kiosk URL只允许`localhost`或`127.0.0.1`，
 脚本不会执行YAML中的任意文本。组权限重新登录后生效。kiosk脚本等待配置端口的`/healthz`，
-再启动Chromium；浏览器退出后自动重启。桌面自动登录涉及现场
+再启动Chromium。Alt+F4或浏览器正常退出后脚本随即正常结束，不会重新打开窗口；只有非零异常
+退出才会延迟2秒重试，连续重试最多5次。桌面自动登录涉及现场
 安全策略，脚本不会擅自开启，请在Raspberry Pi图形桌面设置中手动启用目标普通用户的自动登录。
 
 `start_kiosk.sh`依次查找Chromium、Chrome和Firefox，并把浏览器PID原子写入
 `runtime/kiosk.pid`。Chrome/Chromium额外使用项目专用的`runtime/chrome-profile`，不会复用或
 修改用户普通Chrome配置，也能避免PID只指向短暂启动器。维护菜单“退出全屏界面”调用固定的
 `POST /api/kiosk/exit`：后端只接受该
-PID文件，验证当前用户、浏览器名称和`--kiosk`参数后发送`SIGTERM`，客户端不能提交PID或任意
-命令。显式退出会写入退出标记，因此脚本不会立即重启浏览器；下次桌面登录或重新执行脚本仍会
-正常打开。
+PID文件，验证当前用户、浏览器名称、`--kiosk`参数以及项目专用profile或本地URL后发送
+`SIGTERM`，客户端不能提交PID或任意命令。显式退出会先原子写入
+`runtime/kiosk.exit_requested`，因此脚本不会立即重启浏览器，视觉后端仍继续运行。需要手动重新
+打开时执行`deploy/start_kiosk.sh &`，也可重新登录桌面由XDG autostart启动；脚本每次新启动都会
+清除上次会话遗留的退出标志。
 
 维护菜单“停止视觉程序”调用无参数的`POST /api/runtime/stop`。响应发回页面后，运行时异步请求
 安全停止，由`VisionRuntime.stop`按既有生命周期释放预览线程、串口和唯一CameraService，正常
