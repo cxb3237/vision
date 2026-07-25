@@ -1,0 +1,19 @@
+[Unit]
+Description=Raspberry Pi Vision Touch Runtime
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=video dialout
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@PROJECT_DIR@/.venv/bin/python app.py --mode track --serial-port /dev/ttyAMA0 --baudrate 115200 --serial-rate 20 --touch-ui --headless
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillSignal=SIGINT
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

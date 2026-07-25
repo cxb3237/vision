@@ -127,6 +127,85 @@ def test_read_controls_parses_actual_values_without_shell(monkeypatch) -> None:
     assert calls[0]["shell"] is False
 
 
+def test_query_control_info_windows_returns_explicit_unsupported(monkeypatch) -> None:
+    monkeypatch.setattr(v4l2.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        v4l2.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("Windows不得执行v4l2-ctl"),
+    )
+    info = v4l2.query_v4l2_control_info(0, ["brightness"])["brightness"]
+    assert not info["supported"]
+    assert "当前平台 Windows 不支持" in info["error"]
+
+
+def test_query_control_info_parses_range_and_uses_no_shell(monkeypatch) -> None:
+    _linux_with_command(monkeypatch)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout="brightness 0x00980900 (int) : min=-64 max=64 step=1 default=0 value=12\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(v4l2.subprocess, "run", fake_run)
+    info = v4l2.query_v4l2_control_info(0, ["brightness", "gamma"])
+    assert info["brightness"]["supported"]
+    assert info["brightness"]["minimum"] == -64
+    assert info["brightness"]["actual"] == 12
+    assert not info["gamma"]["supported"]
+    assert calls[0][1]["shell"] is False
+
+
+def test_query_control_info_parses_real_bool_menu_and_flags(monkeypatch) -> None:
+    _linux_with_command(monkeypatch)
+    output = """brightness 0x00980900 (int) :
+    min=-255 max=255 step=1 default=0 value=0
+white_balance_automatic 0x0098090c (bool) :
+    default=1 value=1
+power_line_frequency 0x00980918 (menu) :
+    min=0 max=2 default=1 value=1 (50 Hz)
+white_balance_temperature 0x0098091a (int) :
+    min=2500 max=7000 step=1 default=4600 value=5000 flags=inactive
+"""
+    monkeypatch.setattr(
+        v4l2.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=output, stderr=""
+        ),
+    )
+    info = v4l2.query_v4l2_control_info(
+        0,
+        [
+            "brightness",
+            "white_balance_automatic",
+            "power_line_frequency",
+            "white_balance_temperature",
+        ],
+    )
+    white_balance = info["white_balance_automatic"]
+    assert white_balance["supported"] and white_balance["type"] == "bool"
+    assert (white_balance["minimum"], white_balance["maximum"], white_balance["step"]) == (
+        0,
+        1,
+        1,
+    )
+    assert white_balance["default"] == white_balance["actual"] == 1
+    power_line = info["power_line_frequency"]
+    assert power_line["supported"] and power_line["type"] == "menu"
+    assert (power_line["minimum"], power_line["maximum"], power_line["step"]) == (
+        0,
+        2,
+        1,
+    )
+    assert power_line["actual"] == 1
+    assert info["white_balance_temperature"]["actual"] == 5000
+
+
 def test_automatic_control_is_applied_before_manual_value(monkeypatch) -> None:
     _linux_with_command(monkeypatch)
     controls_in_order = []
@@ -146,6 +225,32 @@ def test_automatic_control_is_applied_before_manual_value(monkeypatch) -> None:
     )
     assert controls_in_order.index("white_balance_automatic") < controls_in_order.index(
         "white_balance_temperature"
+    )
+
+
+def test_enabling_automatic_control_restores_manual_value_first(monkeypatch) -> None:
+    _linux_with_command(monkeypatch)
+    controls_in_order = []
+
+    def fake_run(command, **_kwargs):
+        controls_in_order.append(command[-1].split("=", 1)[0])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(v4l2.subprocess, "run", fake_run)
+    v4l2.apply_v4l2_controls(
+        0,
+        {
+            "white_balance_automatic": 1,
+            "white_balance_temperature": 4600,
+            "exposure_auto": 3,
+            "exposure_absolute": 120,
+        },
+    )
+    assert controls_in_order.index("white_balance_temperature") < controls_in_order.index(
+        "white_balance_automatic"
+    )
+    assert controls_in_order.index("exposure_absolute") < controls_in_order.index(
+        "exposure_auto"
     )
 
 

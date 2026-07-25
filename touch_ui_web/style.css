@@ -1,0 +1,75 @@
+:root {
+  color-scheme: dark;
+  --bg: #091015;
+  --panel: #121d24;
+  --panel-2: #182730;
+  --line: #29404d;
+  --text: #f2f7f8;
+  --muted: #9bb0ba;
+  --accent: #33d6a6;
+  --accent-2: #63a9ff;
+  --danger: #ff6b5d;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, #19303a, var(--bg) 45%); color: var(--text); }
+header { min-height: 74px; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+h1 { font-size: clamp(22px, 3vw, 32px); margin: 0; letter-spacing: .04em; }
+h2 { margin: 6px 0 12px; font-size: 19px; }
+.eyebrow { color: var(--accent); font-size: 11px; letter-spacing: .22em; }
+.badge { padding: 10px 16px; border-radius: 999px; font-weight: 800; background: #193d33; color: var(--accent); }
+.badge.offline { background: #402724; color: #ff9b91; }
+#debugView { padding: 14px; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.5fr) minmax(280px, .8fr); }
+section { border: 1px solid var(--line); border-radius: 18px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 14px 40px #0004; overflow: hidden; }
+.preview-card { min-height: 320px; position: relative; background: #020507; }
+#preview { width: 100%; height: min(64vh, 600px); object-fit: contain; display: block; }
+.preview-strip { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px; display: flex; gap: 22px; background: #03090ddd; font-size: 14px; }
+.preview-strip b { color: var(--accent); }
+.telemetry-card { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); }
+.metric { padding: 13px; background: var(--panel); min-height: 74px; }
+.metric.hero { grid-column: span 2; background: linear-gradient(125deg, #183a38, #172832); }
+label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+.metric strong { font-size: clamp(18px, 3vw, 28px); }
+.metric.hero strong { color: var(--accent); font-size: clamp(34px, 6vw, 62px); }
+.error-line { grid-column: span 2; padding: 12px; min-height: 44px; background: #261b1b; color: #ffaaa1; }
+.controls-card, .camera-card { padding: 14px; }
+.controls-card { grid-column: span 2; }
+.button-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+button { min-height: 56px; padding: 10px 14px; border: 1px solid #3d5968; border-radius: 13px; background: var(--panel-2); color: var(--text); font-size: 16px; font-weight: 700; touch-action: manipulation; }
+button:active, button.active { transform: translateY(1px); border-color: var(--accent); background: #1e443d; }
+button:disabled { opacity: .42; }
+button.danger { border-color: #6a3c36; color: #ffb0a8; }
+.camera-card { grid-column: span 2; display: none; }
+.camera-card.open { display: block; }
+.section-title { display: flex; justify-content: space-between; align-items: center; }
+.section-title button { min-height: 42px; }
+.hint { color: var(--muted); }
+.control-row { display: grid; grid-template-columns: minmax(190px, .8fr) 2fr 90px; gap: 14px; align-items: center; padding: 12px 4px; border-top: 1px solid var(--line); }
+.control-row input[type="range"] { width: 100%; height: 42px; accent-color: var(--accent); }
+.control-meta { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.control-value { font-size: 20px; text-align: center; }
+#competitionView { min-height: calc(100vh - 75px); padding: 18px; display: grid; place-items: center; }
+#competitionView[hidden] { display: none; }
+.competition-card { width: min(100%, 1000px); padding: clamp(20px, 5vw, 54px); text-align: center; }
+.running { color: var(--accent); font-size: clamp(54px, 12vw, 130px); font-weight: 900; letter-spacing: .08em; }
+.competition-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 24px 0; }
+.competition-grid div { background: var(--panel-2); padding: 18px; border-radius: 12px; }
+.competition-grid strong { font-size: clamp(22px, 4vw, 42px); }
+#exitCompetition { width: 100%; }
+#holdProgress { height: 6px; width: 0; background: var(--danger); transition: width .1s linear; }
+#toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); min-width: 240px; max-width: 90vw; padding: 14px 18px; border-radius: 12px; background: #05090cee; border: 1px solid var(--line); opacity: 0; pointer-events: none; transition: opacity .2s; }
+#toast.show { opacity: 1; }
+@media (max-width: 850px) {
+  #debugView { grid-template-columns: 1fr; }
+  .controls-card, .camera-card { grid-column: span 1; }
+  .button-grid { grid-template-columns: repeat(2, 1fr); }
+  #preview { height: min(52vh, 430px); }
+}
+@media (orientation: portrait) and (max-width: 760px) {
+  header { min-height: 64px; }
+  #debugView { padding: 8px; gap: 8px; }
+  .preview-strip { gap: 10px; justify-content: space-between; }
+  .competition-grid { grid-template-columns: 1fr 1fr; }
+  .control-row { grid-template-columns: 1fr 80px; }
+  .control-row input { grid-column: span 2; }
+}

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Vision Touch Kiosk
+Exec=/usr/bin/env VISION_TOUCH_URL=@TOUCH_URL@ @PROJECT_DIR@/deploy/start_kiosk.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true

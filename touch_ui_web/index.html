@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Vision Field Console</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">RPI VISION</span><h1>现场调试台</h1></div>
+    <div id="runningBadge" class="badge offline">STOPPED</div>
+  </header>
+
+  <main id="debugView">
+    <section class="preview-card">
+      <img id="preview" src="/api/preview.mjpg" alt="实时标注画面">
+      <div class="preview-strip">
+        <span>CAM <b id="cameraOnline">OFF</b></span>
+        <span>UART <b id="serialOnline">OFF</b></span>
+        <span>FPS <b id="fps">0.0</b></span>
+        <span>TX <b id="txCount">0</b></span>
+      </div>
+    </section>
+
+    <section class="telemetry-card">
+      <div class="metric hero"><label>识别类别</label><strong id="targetClass">—</strong></div>
+      <div class="metric"><label>检测器</label><strong id="detector">—</strong></div>
+      <div class="metric"><label>状态</label><strong id="state">NONE</strong></div>
+      <div class="metric"><label>置信度</label><strong id="confidence">0</strong></div>
+      <div class="metric"><label>中心</label><strong id="center">-1, -1</strong></div>
+      <div class="metric"><label>误差</label><strong id="error">0, 0</strong></div>
+      <div class="metric"><label>模式</label><strong id="mode">—</strong></div>
+      <div class="metric"><label>现场参数</label><strong id="modified">基准</strong></div>
+      <div class="error-line" id="lastError">无错误</div>
+    </section>
+
+    <section class="controls-card">
+      <h2>检测器</h2>
+      <div class="button-grid">
+        <button data-detector="digit">数字识别</button>
+        <button data-detector="color">颜色识别</button>
+        <button data-detector="shape">形状识别</button>
+        <button data-detector="steel_ball">钢球识别</button>
+      </div>
+      <h2>现场操作</h2>
+      <div class="button-grid actions">
+        <button id="showCamera">摄像头参数</button>
+        <button id="saveRuntime">保存现场参数</button>
+        <button id="restoreLast">恢复上次有效参数</button>
+        <button id="restoreBaseline">恢复基准参数</button>
+        <button id="enterCompetition" class="danger">进入比赛模式</button>
+      </div>
+    </section>
+
+    <section class="camera-card" id="cameraPanel">
+      <div class="section-title"><h2>摄像头参数</h2><button id="closeCamera">关闭</button></div>
+      <p class="hint">请求通过视觉线程应用；灰色项表示当前摄像头或平台不支持。</p>
+      <div id="cameraControls"></div>
+    </section>
+  </main>
+
+  <main id="competitionView" hidden>
+    <section class="competition-card">
+      <div class="running">RUNNING</div>
+      <div class="competition-grid">
+        <div><label>检测器</label><strong id="cDetector">—</strong></div>
+        <div><label>类别</label><strong id="cClass">—</strong></div>
+        <div><label>状态</label><strong id="cState">NONE</strong></div>
+        <div><label>置信度</label><strong id="cConfidence">0</strong></div>
+        <div><label>FPS</label><strong id="cFps">0</strong></div>
+        <div><label>摄像头 / 串口</label><strong id="cLinks">OFF / OFF</strong></div>
+      </div>
+      <button id="exitCompetition">长按3秒退出比赛模式</button>
+      <div id="holdProgress"></div>
+    </section>
+  </main>
+
+  <div id="toast" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

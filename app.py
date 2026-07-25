@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 from collections import OrderedDict
+from dataclasses import replace
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import signal
 import threading
@@ -26,6 +28,7 @@ from core.config_loader import (
 from core.fault_manager import Fault, FaultManager
 from core.models import ColorClass, DetectorConfig, VisionResult
 from core.state_machine import VisionMode, VisionStateMachine
+from core.vision_runtime import VisionRuntime
 from detectors.base_detector import BaseDetector
 from detectors.color_detector import ColorDetector
 from detectors.digit_detector import DigitDetector
@@ -44,6 +47,9 @@ from protocol.vmc_messages import (
 )
 from protocol.vmc_protocol import VmcPacket
 from tools.mock_camera import MockCamera
+from touch_ui.models import TouchUIConfig, TouchUIConfigError, load_touch_ui_config
+from touch_ui.runtime_config import RuntimeConfigStore
+from touch_ui.server import TouchUIServer
 
 
 LOG = logging.getLogger(__name__)
@@ -81,6 +87,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--serial-rate", type=float, help="覆盖视觉结果发送频率 Hz")
     parser.add_argument("--serial-debug", action="store_true", help="记录发送包十六进制")
     parser.add_argument("--no-serial", action="store_true", help="完全禁用串口硬件")
+    parser.add_argument("--touch-ui", action="store_true", help="启动本地触摸Web界面")
+    parser.add_argument("--touch-host", default=None, help="覆盖触摸Web服务绑定地址")
+    parser.add_argument("--touch-port", type=int, default=None, help="覆盖触摸Web服务端口")
+    parser.add_argument("--touch-config", default="config/touch_ui.yaml")
+    parser.add_argument("--headless", action="store_true", help="禁止所有OpenCV窗口")
+    parser.add_argument(
+        "--competition-mode", action="store_true", help="启动时直接进入比赛锁定界面"
+    )
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -133,13 +147,70 @@ def create_detector(
     )
 
 
-def create_camera_source(args: argparse.Namespace, mission: dict[str, Any]):
+def create_camera_source(
+    args: argparse.Namespace,
+    mission: dict[str, Any],
+    camera_config=None,
+):
     """创建真实摄像头服务或可结束的模拟视频源。"""
 
     if args.video:
         loop = args.video_loop or bool(mission["video_loop"])
         return MockCamera(args.video, loop=loop)
-    return CameraService(load_camera_config(args.camera_config))
+    return CameraService(camera_config or load_camera_config(args.camera_config))
+
+
+def validate_ui_arguments(args: argparse.Namespace) -> None:
+    if bool(getattr(args, "touch_ui", False)) and bool(getattr(args, "display", False)):
+        raise ConfigError("--touch-ui不能与--display同时使用")
+    port = getattr(args, "touch_port", None)
+    if port is not None and (
+        isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
+    ):
+        raise ConfigError("--touch-port必须在1..65535范围内")
+    host = getattr(args, "touch_host", None)
+    if host is not None and (not isinstance(host, str) or not host.strip()):
+        raise ConfigError("--touch-host必须为非空地址")
+
+
+def resolve_touch_ui_config(
+    args: argparse.Namespace,
+    *,
+    project_root: str | Path | None = None,
+) -> TouchUIConfig:
+    """按“命令行明确值 > YAML”合并并验证触摸服务地址。"""
+
+    config = load_touch_ui_config(args.touch_config, project_root=project_root)
+    host = config.host if args.touch_host is None else args.touch_host
+    port = config.port if args.touch_port is None else args.touch_port
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigError("触摸Web服务host必须为非空地址")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ConfigError("触摸Web服务port必须在1..65535范围内")
+    return replace(config, host=host.strip(), port=port)
+
+
+def configure_touch_logging(log_path: str | Path = "logs/touch_ui.log") -> None:
+    """增加有限大小的触摸界面轮转日志，不改变现有控制台日志。"""
+
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    resolved = path.resolve()
+    root = logging.getLogger()
+    if any(
+        isinstance(handler, RotatingFileHandler)
+        and Path(getattr(handler, "baseFilename", "")).resolve() == resolved
+        for handler in root.handlers
+    ):
+        return
+    handler = RotatingFileHandler(
+        resolved,
+        maxBytes=1_048_576,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root.addHandler(handler)
 
 
 def resolve_serial_settings(
@@ -357,8 +428,13 @@ def run_application(
     serial_service: SerialService,
     detector_id: str | int = 0,
     camera_calibrated: bool = False,
+    detector_factory: Any | None = None,
+    current_detector_name: str = "color",
+    camera_config: Any | None = None,
+    touch_config: TouchUIConfig | None = None,
+    initial_competition_mode: bool = False,
 ) -> int:
-    """运行主循环；所有启动操作均受 finally 和成功标志保护。"""
+    """创建唯一VisionRuntime并运行；旧命令行模式仍经过同一安全生命周期。"""
 
     initial_mode = VisionMode[(args.mode or mission["default_mode"]).upper()]
     if initial_mode not in SUPPORTED_RUNTIME_MODES:
@@ -377,147 +453,47 @@ def run_application(
         target_class,
         reset_callback=getattr(detector, "reset", None),
     )
-    faults = FaultManager()
-    stop_event = threading.Event()
-
-    def request_stop(_signum: int, _frame: Any) -> None:
-        stop_event.set()
-
-    old_sigint = signal.signal(signal.SIGINT, request_stop)
-    old_sigterm = signal.signal(signal.SIGTERM, request_stop)
-    started = time.monotonic()
-    last_heartbeat = float("-inf")
-    last_statistics = started
-    last_frame_seen = started
-    last_frame_id: int | None = None
-    service_sequence = 0
-    processed = 0
-    process_time_total = 0.0
-    display = args.display or bool(mission["display"])
-    camera_started = False
-    serial_started = False
+    runtime = VisionRuntime(
+        args=args,
+        mission=mission,
+        detector=detector,
+        camera_service=camera_source,
+        serial_service=serial_service,
+        detector_id=detector_id,
+        camera_calibrated=camera_calibrated,
+        control_processor=processor,
+        control_handler=_handle_control_messages,
+        display_handler=_handle_display,
+        save_debug_frame=_save_debug_frame,
+        peer_alive_checker=is_peer_alive,
+        detector_factory=detector_factory,
+        current_detector_name=current_detector_name,
+        camera_config=camera_config,
+        touch_config=touch_config,
+        initial_competition_mode=initial_competition_mode,
+    )
+    touch_server = TouchUIServer(runtime, touch_config) if touch_config is not None else None
+    old_sigint = None
+    old_sigterm = None
+    if threading.current_thread() is threading.main_thread():
+        old_sigint = signal.signal(signal.SIGINT, lambda *_: runtime.request_stop())
+        old_sigterm = signal.signal(signal.SIGTERM, lambda *_: runtime.request_stop())
     try:
-        detector.initialize()
-        camera_source.start()
-        camera_started = True
-        serial_service.start()
-        serial_started = serial_service.enabled
-        while not stop_event.is_set():
-            now = time.monotonic()
-            if hasattr(serial_service, "raise_if_failed"):
-                serial_service.raise_if_failed()
-            service_sequence = _handle_control_messages(
-                serial_service,
-                processor,
-                service_sequence,
-            )
-            serial_stats = serial_service.get_statistics()
-            peer_alive = is_peer_alive(
-                serial_stats,
-                now,
-                mission["serial_link_timeout_ms"] / 1000.0,
-            )
-            if serial_service.enabled and not peer_alive:
-                faults.set_fault(Fault.SERIAL_LINK_DOWN)
-            else:
-                faults.clear_fault(Fault.SERIAL_LINK_DOWN)
-            if now - last_heartbeat >= 1.0 / mission["heartbeat_hz"]:
-                heartbeat = Heartbeat(
-                    uptime_ms=int((now - started) * 1000) & 0xFFFFFFFF,
-                    system_state=1 if faults.fault_bits() else 0,
-                    active_mode=int(state_machine.mode),
-                    fault_bits=faults.fault_bits(),
-                    rx_good_count=int(serial_stats["rx_good_count"]) & 0xFFFF,
-                    rx_crc_error_count=int(serial_stats["rx_crc_error_count"]) & 0xFFFF,
-                )
-                serial_service.send_packet(
-                    MessageType.HEARTBEAT,
-                    0,
-                    service_sequence,
-                    heartbeat.pack(),
-                )
-                service_sequence = (service_sequence + 1) & 0xFF
-                last_heartbeat = now
-
-            frame = camera_source.get_latest_frame()
-            if frame is None:
-                if hasattr(camera_source, "is_finished") and camera_source.is_finished():
-                    LOG.info("视频模拟源已结束")
-                    break
-                if now - last_frame_seen > mission["camera_frame_timeout_ms"] / 1000.0:
-                    faults.set_fault(Fault.CAMERA_FRAME_TIMEOUT)
-                time.sleep(0.005)
-                continue
-            if frame.frame_id == last_frame_id:
-                time.sleep(0.001)
-                continue
-            last_frame_id = frame.frame_id
-            last_frame_seen = now
-            faults.clear_fault(Fault.CAMERA_FRAME_TIMEOUT)
-            result: VisionResult | None = None
-            if state_machine.mode in (VisionMode.SEARCH, VisionMode.TRACK):
-                process_start = time.monotonic()
-                try:
-                    detected = detector.process(frame)
-                    result = (
-                        detected
-                        if isinstance(detector, (SteelBallDetector, DigitDetector))
-                        else tracker.update(detected)
-                    )
-                    faults.clear_fault(Fault.DETECTOR_FAILED)
-                except Exception:
-                    faults.set_fault(Fault.DETECTOR_FAILED)
-                    LOG.exception("检测器处理失败")
-                process_time_total += time.monotonic() - process_start
-                processed += 1
-                if result is not None:
-                    serial_service.publish_result(
-                        result,
-                        detector_id,
-                        camera_calibrated=camera_calibrated,
-                    )
-            annotated = None
-            if display:
-                keep_running, annotated = _handle_display(
-                    frame.image,
-                    detector,
-                    result,
-                    processor,
-                )
-                if not keep_running:
-                    break
-            if mission["save_debug_frames"]:
-                if annotated is None:
-                    annotated = (
-                        detector.draw_debug(frame.image, result)
-                        if result is not None
-                        else frame.image.copy()
-                    )
-                _save_debug_frame(annotated)
-            if now - last_statistics >= mission["statistics_interval_s"]:
-                camera_stats = camera_source.get_statistics()
-                LOG.info(
-                    "mode=%s camera_fps=%.2f vision_fps=%.2f avg_process_ms=%.2f "
-                    "camera_failed=%s port_open=%s peer_alive=%s faults=0x%04X",
-                    state_machine.mode.name,
-                    float(camera_stats.get("actual_fps", 0.0)),
-                    processed / max(now - started, 0.001),
-                    1000 * process_time_total / max(processed, 1),
-                    camera_stats.get("frames_failed", 0),
-                    serial_stats["port_open"],
-                    peer_alive,
-                    faults.fault_bits(),
-                )
-                last_statistics = now
-        return 0
+        runtime.start()
+        if touch_server is not None:
+            try:
+                touch_server.start()
+            except Exception:
+                LOG.exception("触摸界面启动失败；视觉和串口继续运行")
+        return runtime.run_forever()
     finally:
-        if serial_started:
-            serial_service.stop()
-        if camera_started:
-            camera_source.stop()
-        cv2.destroyAllWindows()
-        signal.signal(signal.SIGINT, old_sigint)
-        signal.signal(signal.SIGTERM, old_sigterm)
+        if touch_server is not None:
+            touch_server.stop()
+        runtime.stop()
+        if old_sigint is not None:
+            signal.signal(signal.SIGINT, old_sigint)
+        if old_sigterm is not None:
+            signal.signal(signal.SIGTERM, old_sigterm)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -529,13 +505,33 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     try:
+        validate_ui_arguments(args)
         mission = load_mission_config(
             args.mission_config,
             colors_path=args.colors_config,
         )
         colors = load_color_config(args.colors_config)
+        touch_config: TouchUIConfig | None = None
+        restored_ui_state: dict[str, Any] = {}
+        if args.touch_ui:
+            args.headless = True
+            touch_config = resolve_touch_ui_config(args)
+            configure_touch_logging()
+            if touch_config.restore_runtime_overrides:
+                try:
+                    restored_ui_state = RuntimeConfigStore(touch_config).load_ui_state()
+                except ValueError as exc:
+                    LOG.warning("忽略无效的触摸UI运行状态: %s", exc)
+        detector_name = args.detector or mission["detector"]
+        if args.touch_ui and args.detector is None and touch_config is not None:
+            restored_detector = restored_ui_state.get("detector")
+            detector_name = (
+                restored_detector
+                if restored_detector in {"color", "shape", "steel_ball", "digit"}
+                else touch_config.startup_detector
+            )
         detector = create_detector(
-            args.detector or mission["detector"],
+            detector_name,
             args.target or mission["target_color"],
             colors,
             mission,
@@ -544,7 +540,8 @@ def main(argv: list[str] | None = None) -> int:
             args.calibration_config,
             args.digit_config,
         )
-        camera_source = create_camera_source(args, mission)
+        camera_config = load_camera_config(args.camera_config)
+        camera_source = create_camera_source(args, mission, camera_config)
         serial_settings = resolve_serial_settings(args, mission)
         serial_service = SerialService(
             serial_settings.pop("port"),
@@ -552,16 +549,44 @@ def main(argv: list[str] | None = None) -> int:
             **serial_settings,
         )
         calibration = load_calibration_config(args.calibration_config)
+
+        def detector_factory(name: str):
+            return create_detector(
+                name,
+                args.target or mission["target_color"],
+                colors,
+                mission,
+                args.shapes_config,
+                args.steel_ball_config,
+                args.calibration_config,
+                args.digit_config,
+            )
+
+        competition_mode = bool(args.competition_mode)
+        if touch_config is not None and not competition_mode:
+            if touch_config.restore_runtime_overrides:
+                competition_mode = bool(
+                    restored_ui_state.get(
+                        "competition_mode", touch_config.startup_competition_mode
+                    )
+                )
+            else:
+                competition_mode = touch_config.startup_competition_mode
         return run_application(
             args,
             mission,
             detector,
             camera_source,
             serial_service,
-            detector_id=args.detector or mission["detector"],
+            detector_id=detector_name,
             camera_calibrated=calibration.calibrated,
+            detector_factory=detector_factory,
+            current_detector_name=detector_name,
+            camera_config=camera_config,
+            touch_config=touch_config,
+            initial_competition_mode=competition_mode,
         )
-    except (ConfigError, ValueError, OSError) as exc:
+    except (ConfigError, TouchUIConfigError, ValueError, OSError) as exc:
         LOG.error("启动失败: %s", exc)
         return 2
     except Exception:
