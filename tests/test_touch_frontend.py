@@ -25,6 +25,36 @@ def test_camera_parameters_have_the_only_independent_scroll_area() -> None:
     assert HTML.index('id="drawerHandle"') < HTML.index('id="maintenanceButton"')
 
 
+def test_compact_footer_has_three_short_single_line_actions() -> None:
+    assert 'grid-template-columns: repeat(3, minmax(0, 1fr))' in CSS
+    assert '>保存</button>' in HTML and '>上次</button>' in HTML and '>基准</button>' in HTML
+    assert 'aria-label="保存现场参数" title="保存现场参数"' in HTML
+    assert 'aria-label="恢复上次有效参数" title="恢复上次有效参数"' in HTML
+    assert 'aria-label="恢复启动基准参数" title="恢复启动基准参数"' in HTML
+    assert HTML.index('id="operationResult"') < HTML.index('class="drawer-footer"')
+    assert '.drawer-footer button' in CSS and 'white-space: nowrap' in CSS
+
+
+def test_touch_range_uses_direction_lock_without_blocking_vertical_scroll() -> None:
+    assert 'touch-action: pan-y' in CSS
+    assert 'classifyPointerGesture(' in JS
+    assert 'gesture.mode === "horizontal"' in JS
+    assert 'setPointerCapture(event.pointerId)' in JS
+    assert 'window.addEventListener("pointermove", onPointerMove, {passive: false})' in JS
+    assert 'window.addEventListener("pointercancel", onPointerCancel)' in JS
+
+
+def test_camera_controls_are_compact_chinese_and_writable_only() -> None:
+    assert 'controlIsWritable(name, info)' in JS
+    assert 'controlDependencyHidden(name, cameraControlsState)' in JS
+    assert 'controlDisplayName(name)' in JS
+    assert 'setDiagnostic("正在应用")' in JS
+    assert 'setDiagnostic("应用失败", true)' in JS
+    assert '"图像"' in JS and '"曝光"' in JS and '"白平衡"' in JS
+    assert '.control-inputs input[type="range"]' in CSS and 'height: 32px' in CSS
+    assert 'setInterval(() =>' in JS and '}, 150)' in JS
+
+
 def test_drawer_supports_click_drag_snap_and_pointer_cancel() -> None:
     for event in ("pointerdown", "pointermove", "pointerup", "pointercancel"):
         assert event in JS
@@ -51,6 +81,15 @@ def test_restore_and_save_wait_then_replace_full_camera_state() -> None:
         "exposure_absolute",
     ):
         assert control in JS
+
+
+def test_applied_control_renders_once_and_preserves_scroll_position() -> None:
+    assert "setTimeout(renderCameraControls" not in JS
+    assert '["DEBOUNCE", "SENT"].includes(phase)' in JS
+    assert 'controlScheduler.phase(name) !== "IDLE"' not in JS
+    assert "cameraControlsRenderCount += 1" in JS
+    assert "const previousScrollTop = container.scrollTop" in JS
+    assert "container.scrollTop = Math.min(" in JS
 
 
 def test_restore_failure_does_not_reload_or_claim_success() -> None:

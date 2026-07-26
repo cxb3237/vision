@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>Vision Field Console</title>
-  <link rel="stylesheet" href="/style.css?v=2">
+  <link rel="stylesheet" href="/style.css?v=5">
 </head>
 <body>
   <div id="appShell">
@@ -83,15 +83,17 @@
       <section id="cameraPanel" class="camera-drawer" aria-hidden="true">
         <header class="drawer-header">
           <div><span class="eyebrow">CAMERA PROFILE</span><h2>摄像头参数</h2></div>
-          <div class="profile-line">当前配置：<strong id="currentProfile">读取中</strong></div>
+          <div class="drawer-meta">
+            <div class="profile-line">当前配置：<strong id="currentProfile">读取中</strong></div>
+            <div id="operationResult" class="operation-result" aria-live="polite"></div>
+          </div>
           <button id="closeCamera" class="icon-button" aria-label="关闭参数面板">×</button>
         </header>
         <div id="cameraControls" class="camera-controls-scroll"></div>
         <footer class="drawer-footer">
-          <button id="saveRuntime" class="primary">保存现场参数</button>
-          <button id="restoreLast">恢复上次有效参数</button>
-          <button id="restoreBaseline" class="danger">恢复基准参数</button>
-          <div id="operationResult" class="operation-result">尚无参数操作</div>
+          <button id="saveRuntime" class="primary" aria-label="保存现场参数" title="保存现场参数">保存</button>
+          <button id="restoreLast" aria-label="恢复上次有效参数" title="恢复上次有效参数">上次</button>
+          <button id="restoreBaseline" class="danger" aria-label="恢复启动基准参数" title="恢复启动基准参数">基准</button>
         </footer>
       </section>
     </aside>
@@ -122,7 +124,7 @@
 
   <div id="stoppedOverlay" class="stopped-overlay" hidden>视觉服务已停止</div>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/control_scheduler.js?v=3"></script>
-  <script src="/app.js?v=3"></script>
+  <script src="/control_scheduler.js?v=5"></script>
+  <script src="/app.js?v=5"></script>
 </body>
 </html>

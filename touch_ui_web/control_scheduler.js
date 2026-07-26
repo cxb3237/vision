@@ -2,10 +2,152 @@
   "use strict";
   const exported = factory();
   if (typeof module === "object" && module.exports) module.exports = exported;
-  root.ControlUpdateScheduler = exported.ControlUpdateScheduler;
-  root.VmcTxTracker = exported.VmcTxTracker;
+  Object.assign(root, exported);
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
+
+  const CONTROL_LABELS = Object.freeze({
+    brightness: "亮度",
+    contrast: "对比度",
+    saturation: "饱和度",
+    hue: "色调",
+    sharpness: "锐度",
+    gamma: "伽马",
+    gain: "增益",
+    backlight_compensation: "逆光补偿",
+    white_balance_automatic: "自动白平衡",
+    white_balance_temperature: "白平衡色温",
+    exposure_auto: "自动曝光",
+    exposure_absolute: "曝光时间",
+    power_line_frequency: "抗频闪频率",
+    focus_auto: "自动对焦",
+    focus_absolute: "对焦位置",
+  });
+  const WRITABLE_CONTROL_KEYS = new Set(Object.keys(CONTROL_LABELS));
+  const VALID_CONTROL_TYPES = new Set(["int", "integer", "integer64", "bool", "boolean", "menu"]);
+  const TOKEN_LABELS = Object.freeze({
+    auto: "自动", automatic: "自动", balance: "平衡", compensation: "补偿",
+    temperature: "色温", absolute: "数值", frequency: "频率", focus: "对焦",
+    exposure: "曝光", white: "白", backlight: "逆光", power: "电源", line: "线路",
+  });
+
+  function normalizedChoices(info = {}) {
+    const source = info.choices;
+    const choices = [];
+    if (Array.isArray(source)) {
+      source.forEach((item) => {
+        if (item && typeof item === "object" && Number.isFinite(Number(item.value))) {
+          choices.push({value: Number(item.value), label: String(item.label ?? item.name ?? item.value)});
+        }
+      });
+    } else if (source && typeof source === "object") {
+      Object.entries(source).forEach(([value, label]) => {
+        if (Number.isFinite(Number(value))) choices.push({value: Number(value), label: String(label)});
+      });
+    }
+    if (!choices.length && ["bool", "boolean"].includes(String(info.type || "").toLowerCase())) {
+      choices.push({value: 0, label: "Off"}, {value: 1, label: "On"});
+    }
+    const unique = new Map();
+    choices.forEach((choice) => unique.set(choice.value, choice));
+    return [...unique.values()].sort((first, second) => first.value - second.value);
+  }
+
+  function controlDisplayName(name) {
+    if (CONTROL_LABELS[name]) return CONTROL_LABELS[name];
+    const tokens = String(name).split("_");
+    if (tokens.length && tokens.every((token) => TOKEN_LABELS[token])) {
+      return tokens.map((token) => TOKEN_LABELS[token]).join("");
+    }
+    return "其他参数";
+  }
+
+  function translateChoiceLabel(label, value) {
+    const original = String(label ?? "").trim();
+    const normalized = original.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+    const exact = {
+      true: "开", false: "关", on: "开", off: "关", enabled: "开", disabled: "关闭",
+      auto: "自动", automatic: "自动", manual: "手动", "50hz": "50赫兹", "50 hz": "50赫兹",
+      "60hz": "60赫兹", "60 hz": "60赫兹", "manual mode": "手动",
+      "auto mode": "自动", "automatic mode": "自动", "aperture priority mode": "光圈优先",
+      "shutter priority mode": "快门优先",
+    };
+    if (exact[normalized]) return exact[normalized];
+    if (/^50\s*hz\b/.test(normalized)) return "50赫兹";
+    if (/^60\s*hz\b/.test(normalized)) return "60赫兹";
+    if (/manual/.test(normalized)) return "手动";
+    if (/aperture/.test(normalized)) return "光圈优先";
+    if (/shutter/.test(normalized)) return "快门优先";
+    if (/auto/.test(normalized)) return "自动";
+    if (/^[\u3400-\u9fff]/.test(original)) return original;
+    return `选项${value}`;
+  }
+
+  function formatControlValue(name, value, info = {}) {
+    if (value === null || value === undefined || value === "") return "—";
+    const choices = normalizedChoices(info);
+    const choice = choices.find((item) => item.value === Number(value));
+    if (choice) return translateChoiceLabel(choice.label, choice.value);
+    if (["white_balance_automatic", "focus_auto"].includes(name)) {
+      return Number(value) === 0 ? "关" : "开";
+    }
+    return String(value);
+  }
+
+  function controlIsWritable(name, info = {}) {
+    if (info.supported !== true || info.read_only === true || info.writable === false) return false;
+    if (!WRITABLE_CONTROL_KEYS.has(name) && info.setter_supported !== true) return false;
+    const type = String(info.type || "int").toLowerCase();
+    if (!VALID_CONTROL_TYPES.has(type)) return false;
+    const minimum = Number(info.minimum);
+    const maximum = Number(info.maximum);
+    const step = Number(info.step);
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum >= maximum) return false;
+    if (!Number.isFinite(step) || step <= 0) return false;
+    if (type === "menu" && normalizedChoices(info).length < 2) return false;
+    return true;
+  }
+
+  function automaticModeEnabled(name, value, info = {}) {
+    const choice = normalizedChoices(info).find((item) => item.value === Number(value));
+    const semantics = String(choice?.label ?? "").toLowerCase();
+    if (/manual|disabled|\boff\b|false/.test(semantics)) return false;
+    if (/auto|automatic|aperture|shutter|continuous|\bon\b|true/.test(semantics)) return true;
+    if (name === "exposure_auto") return Number(value) !== 1;
+    return Number(value) !== 0;
+  }
+
+  function classifyPointerGesture(deltaX, deltaY) {
+    const horizontal = Math.abs(Number(deltaX) || 0);
+    const vertical = Math.abs(Number(deltaY) || 0);
+    if (vertical >= 10 && vertical > horizontal * 1.25) return "vertical";
+    if (horizontal >= 12 && horizontal > vertical * 1.25) return "horizontal";
+    return "pending";
+  }
+
+  function decimalPlaces(value) {
+    const text = String(value);
+    if (/e-/i.test(text)) return Number(text.split(/e-/i)[1]) || 0;
+    return (text.split(".")[1] || "").length;
+  }
+
+  function quantizeControlValue(value, minimum, maximum, step) {
+    const low = Number(minimum);
+    const high = Number(maximum);
+    const increment = Number(step);
+    if (![value, low, high, increment].every((item) => Number.isFinite(Number(item))) || increment <= 0) {
+      throw new TypeError("控制范围和step必须是有效数字");
+    }
+    const digits = Math.min(8, Math.max(decimalPlaces(low), decimalPlaces(high), decimalPlaces(increment)));
+    const scale = 10 ** digits;
+    const lowUnits = Math.round(low * scale);
+    const highUnits = Math.round(high * scale);
+    const stepUnits = Math.max(1, Math.round(increment * scale));
+    const valueUnits = Math.round(Number(value) * scale);
+    const snapped = lowUnits + Math.round((valueUnits - lowUnits) / stepUnits) * stepUnits;
+    const clamped = Math.min(highUnits, Math.max(lowUnits, snapped));
+    return Number((clamped / scale).toFixed(digits));
+  }
 
   class ControlUpdateScheduler {
     constructor({debounceMs = 150, apply, onApplied = async () => {}, onError = () => {}}) {
@@ -165,5 +307,17 @@
     }
   }
 
-  return {ControlUpdateScheduler, VmcTxTracker};
+  return {
+    CONTROL_LABELS,
+    ControlUpdateScheduler,
+    VmcTxTracker,
+    automaticModeEnabled,
+    classifyPointerGesture,
+    controlDisplayName,
+    controlIsWritable,
+    formatControlValue,
+    normalizedChoices,
+    quantizeControlValue,
+    translateChoiceLabel,
+  };
 });

@@ -221,6 +221,10 @@ def query_v4l2_control_info(
             "step": None,
             "default": None,
             "actual": None,
+            "choices": [],
+            "flags": [],
+            "read_only": False,
+            "writable": False,
             "error": None,
         }
         for name in unique_names
@@ -239,7 +243,7 @@ def query_v4l2_control_info(
         return result
     try:
         completed = subprocess.run(
-            [executable, "--device", resolve_video_device(device), "--list-ctrls"],
+            [executable, "--device", resolve_video_device(device), "--list-ctrls-menus"],
             check=False,
             capture_output=True,
             text=True,
@@ -262,6 +266,8 @@ def query_v4l2_control_info(
     value_pattern = re.compile(
         r"\b(?P<key>min|max|step|default|value)=\s*(?P<value>-?\d+)"
     )
+    choice_pattern = re.compile(r"^\s*(?P<value>-?\d+)\s*:\s*(?P<label>.+?)\s*$")
+    flags_pattern = re.compile(r"\bflags=(?P<flags>.+?)\s*$")
 
     current_name: str | None = None
     for line in completed.stdout.splitlines():
@@ -292,6 +298,12 @@ def query_v4l2_control_info(
             continue
 
         info = result[current_name]
+        choice = choice_pattern.match(body)
+        if choice is not None:
+            info["choices"].append(
+                {"value": int(choice.group("value")), "label": choice.group("label")}
+            )
+            continue
         for item in value_pattern.finditer(body):
             key = item.group("key")
             destination = {
@@ -302,7 +314,26 @@ def query_v4l2_control_info(
                 "value": "actual",
             }[key]
             info[destination] = int(item.group("value"))
+        flags = flags_pattern.search(body)
+        if flags is not None:
+            info["flags"] = [
+                flag.strip().lower()
+                for flag in flags.group("flags").split(",")
+                if flag.strip()
+            ]
     for name, info in result.items():
         if not info["supported"]:
             info["error"] = f"摄像头不支持控制 {name}"
+            continue
+        if info["type"] == "bool" and not info["choices"]:
+            info["choices"] = [
+                {"value": 0, "label": "Off"},
+                {"value": 1, "label": "On"},
+            ]
+        info["read_only"] = "read-only" in info["flags"]
+        info["writable"] = (
+            info["type"] in {"int", "integer", "integer64", "bool", "menu"}
+            and not info["read_only"]
+            and "inactive" not in info["flags"]
+        )
     return result

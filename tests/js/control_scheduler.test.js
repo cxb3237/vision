@@ -5,6 +5,13 @@ const assert = require("node:assert/strict");
 const {
   ControlUpdateScheduler,
   VmcTxTracker,
+  automaticModeEnabled,
+  classifyPointerGesture,
+  controlDisplayName,
+  controlIsWritable,
+  formatControlValue,
+  quantizeControlValue,
+  translateChoiceLabel,
 } = require("../../touch_ui_web/control_scheduler.js");
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -140,4 +147,57 @@ test("VMC发送状态按在线和最近增长时间判断", () => {
   assert.equal(tracker.update(true, 2, 2800), "IDLE");
   assert.equal(tracker.update(true, 3, 2900), "ACTIVE");
   assert.equal(tracker.update(false, 3, 3000), "OFFLINE");
+});
+
+test("触摸手势达到阈值后才锁定方向", () => {
+  assert.equal(classifyPointerGesture(4, 30), "vertical");
+  assert.equal(classifyPointerGesture(30, 4), "horizontal");
+  assert.equal(classifyPointerGesture(8, 8), "pending");
+  assert.equal(classifyPointerGesture(11, 1), "pending");
+});
+
+test("步进取整以minimum为基准且不会累积浮点误差", () => {
+  assert.equal(quantizeControlValue(0.29, 0, 1, 0.1), 0.3);
+  assert.equal(quantizeControlValue(11, 10, 30, 4), 10);
+  assert.equal(quantizeControlValue(29.9, 10, 30, 4), 30);
+  assert.equal(quantizeControlValue(-999, -64, 64, 1), -64);
+});
+
+test("可写过滤隐藏不支持只读和无效范围", () => {
+  const valid = {supported: true, writable: true, type: "int", minimum: 0, maximum: 10, step: 1};
+  assert.equal(controlIsWritable("brightness", valid), true);
+  assert.equal(controlIsWritable("brightness", {...valid, supported: false}), false);
+  assert.equal(controlIsWritable("brightness", {...valid, read_only: true}), false);
+  assert.equal(controlIsWritable("brightness", {...valid, writable: false}), false);
+  assert.equal(controlIsWritable("brightness", {...valid, maximum: 0}), false);
+  assert.equal(controlIsWritable("brightness", {...valid, type: "button"}), false);
+  assert.equal(controlIsWritable("power_line_frequency", {...valid, type: "menu", choices: []}), false);
+});
+
+test("中文名称和枚举显示不改变原始值", () => {
+  assert.equal(controlDisplayName("brightness"), "亮度");
+  assert.equal(controlDisplayName("white_balance_temperature"), "白平衡色温");
+  assert.equal(controlDisplayName("unknown_driver_knob"), "其他参数");
+  const powerLine = {type: "menu", choices: [{value: 0, label: "Disabled"}, {value: 1, label: "50 Hz"}]};
+  assert.equal(formatControlValue("power_line_frequency", 0, powerLine), "关闭");
+  assert.equal(formatControlValue("power_line_frequency", 1, powerLine), "50赫兹");
+  assert.equal(translateChoiceLabel("true", 1), "开");
+  assert.equal(translateChoiceLabel("false", 0), "关");
+  assert.equal(translateChoiceLabel("On", 1), "开");
+  assert.equal(translateChoiceLabel("Off", 0), "关");
+  assert.equal(translateChoiceLabel("Auto", 3), "自动");
+  assert.equal(translateChoiceLabel("Manual", 1), "手动");
+  assert.equal(translateChoiceLabel("60 Hz", 2), "60赫兹");
+});
+
+test("自动模式根据choices语义判断并保留原始枚举", () => {
+  const exposure = {
+    type: "menu",
+    choices: [
+      {value: 1, label: "Manual Mode"},
+      {value: 3, label: "Aperture Priority Mode"},
+    ],
+  };
+  assert.equal(automaticModeEnabled("exposure_auto", 1, exposure), false);
+  assert.equal(automaticModeEnabled("exposure_auto", 3, exposure), true);
 });

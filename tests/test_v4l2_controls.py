@@ -158,6 +158,7 @@ def test_query_control_info_parses_range_and_uses_no_shell(monkeypatch) -> None:
     assert info["brightness"]["actual"] == 12
     assert not info["gamma"]["supported"]
     assert calls[0][1]["shell"] is False
+    assert "--list-ctrls-menus" in calls[0][0]
 
 
 def test_query_control_info_parses_real_bool_menu_and_flags(monkeypatch) -> None:
@@ -168,8 +169,13 @@ white_balance_automatic 0x0098090c (bool) :
     default=1 value=1
 power_line_frequency 0x00980918 (menu) :
     min=0 max=2 default=1 value=1 (50 Hz)
+    0: Disabled
+    1: 50 Hz
+    2: 60 Hz
 white_balance_temperature 0x0098091a (int) :
     min=2500 max=7000 step=1 default=4600 value=5000 flags=inactive
+gain 0x00980913 (int) :
+    min=0 max=255 step=1 default=0 value=7 flags=read-only
 """
     monkeypatch.setattr(
         v4l2.subprocess,
@@ -185,6 +191,7 @@ white_balance_temperature 0x0098091a (int) :
             "white_balance_automatic",
             "power_line_frequency",
             "white_balance_temperature",
+            "gain",
         ],
     )
     white_balance = info["white_balance_automatic"]
@@ -203,7 +210,16 @@ white_balance_temperature 0x0098091a (int) :
         1,
     )
     assert power_line["actual"] == 1
+    assert power_line["writable"]
+    assert power_line["choices"] == [
+        {"value": 0, "label": "Disabled"},
+        {"value": 1, "label": "50 Hz"},
+        {"value": 2, "label": "60 Hz"},
+    ]
+    assert white_balance["writable"] and not white_balance["read_only"]
     assert info["white_balance_temperature"]["actual"] == 5000
+    assert not info["white_balance_temperature"]["writable"]
+    assert info["gain"]["read_only"] and not info["gain"]["writable"]
 
 
 def test_automatic_control_is_applied_before_manual_value(monkeypatch) -> None:

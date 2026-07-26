@@ -313,6 +313,64 @@ def test_camera_apply_records_requested_actual_mismatch(tmp_path, monkeypatch) -
     assert runtime.state_store.command_snapshot(command.command_id)["status"] == "APPLIED"
 
 
+def test_auto_control_refreshes_dependent_writable_metadata(tmp_path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    current = {"white_balance_automatic": 1, "white_balance_temperature": 5000}
+    runtime.state_store.update(
+        camera_controls={
+            "white_balance_automatic": {
+                "supported": True,
+                "writable": True,
+                "minimum": 0,
+                "maximum": 1,
+                "step": 1,
+                "actual": 1,
+            },
+            "white_balance_temperature": {
+                "supported": True,
+                "writable": False,
+                "minimum": 2500,
+                "maximum": 7000,
+                "step": 1,
+                "actual": 5000,
+            },
+        }
+    )
+
+    def fake_apply(_device, controls, strict=False):
+        name, value = next(iter(controls.items()))
+        current[name] = value
+        return {name: {"success": True, "error": None}}
+
+    def fake_query(_device, names):
+        return {
+            name: {
+                "name": name,
+                "type": "int",
+                "supported": name in current,
+                "writable": name in current,
+                "minimum": 0 if name == "white_balance_automatic" else 2500,
+                "maximum": 1 if name == "white_balance_automatic" else 7000,
+                "step": 1,
+                "actual": current.get(name),
+                "error": None if name in current else "unsupported",
+            }
+            for name in names
+        }
+
+    monkeypatch.setattr(runtime_module, "apply_v4l2_controls", fake_apply)
+    monkeypatch.setattr(
+        runtime_module,
+        "read_v4l2_controls",
+        lambda _device, names: {name: current.get(name) for name in names},
+    )
+    monkeypatch.setattr(runtime_module, "query_v4l2_control_info", fake_query)
+    runtime._apply_camera_control("white_balance_automatic", 0)
+    controls = runtime.get_runtime_config_snapshot()["controls"]
+    assert controls["white_balance_automatic"]["actual"] == 0
+    assert controls["white_balance_temperature"]["writable"] is True
+
+
 def test_restore_failure_rolls_back_already_applied_controls(tmp_path, monkeypatch) -> None:
     runtime = _runtime(tmp_path)
     current = {"brightness": 10, "contrast": 20}

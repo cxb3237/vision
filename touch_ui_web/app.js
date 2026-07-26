@@ -14,14 +14,22 @@ let maintenanceTimer = null;
 let maintenanceStarted = 0;
 let maintenanceOpenedByHold = false;
 let confirmResolver = null;
+let cameraControlsRenderCount = 0;
+const controlFailures = new Map();
 const vmcTxTracker = new VmcTxTracker(1500);
 const controlScheduler = new ControlUpdateScheduler({
   debounceMs: parameterDebounce,
   apply: applySingleControl,
   onApplied: async (name, _value, camera) => {
-    const info = camera.controls?.[name];
-    if (!info) throw new Error(`服务器同步结果缺少控制项 ${name}`);
-    cameraControlsState[name] = {...info};
+    if (!camera.controls?.[name]) throw new Error(`服务器同步结果缺少控制项 ${name}`);
+    if (["white_balance_automatic", "exposure_auto", "focus_auto"].includes(name)) {
+      Object.entries(camera.controls).forEach(([controlName, info]) => {
+        cameraControlsState[controlName] = {...info};
+      });
+    } else {
+      cameraControlsState[name] = {...camera.controls[name]};
+    }
+    controlFailures.delete(name);
     cameraProfileState = {
       modified: !!camera.modified,
       override_file_active: !!camera.override_file_active,
@@ -29,15 +37,16 @@ const controlScheduler = new ControlUpdateScheduler({
     renderCameraControls();
     renderCurrentProfile();
   },
-  onError: (_name, error) => {
+  onError: (name, error) => {
+    controlFailures.set(name, error.message || String(error));
     renderCameraControls();
     toast(error.message);
   },
 });
 const CONTROL_GROUPS = [
-  ["自动与白平衡", ["white_balance_automatic", "white_balance_temperature"]],
-  ["曝光与对焦", ["exposure_auto", "exposure_absolute", "focus_auto", "focus_absolute", "gain"]],
-  ["画面调整", ["brightness", "contrast", "saturation", "hue", "gamma", "sharpness", "backlight_compensation", "power_line_frequency"]],
+  ["图像", ["brightness", "contrast", "saturation", "sharpness", "hue", "gamma"]],
+  ["曝光", ["exposure_auto", "exposure_absolute", "gain", "backlight_compensation", "power_line_frequency"]],
+  ["白平衡", ["white_balance_automatic", "white_balance_temperature"]],
 ];
 
 async function request(path, options = {}) {
@@ -123,24 +132,190 @@ async function pollStatus() {
   }
 }
 
-function controlDisabledReason(name, controls) {
-  if (name === "white_balance_temperature" && controls.white_balance_automatic?.actual !== 0) {
-    return "自动白平衡开启，手动色温已禁用";
-  }
-  if (name === "exposure_absolute" && ![null, undefined, 1].includes(controls.exposure_auto?.actual)) {
-    return "自动曝光开启，手动曝光已禁用";
-  }
-  if (name === "focus_absolute" && ![null, undefined, 0].includes(controls.focus_auto?.actual)) {
-    return "自动对焦开启，手动焦距已禁用";
-  }
-  return "";
+function effectiveControlValue(name, info) {
+  const desired = controlScheduler.desiredValue(name);
+  if (desired !== undefined) return desired;
+  return info.requested ?? info.actual ?? info.minimum;
 }
 
-function queueControlUpdate(name, value, input, requestedLabel) {
-  input.value = String(value);
-  requestedLabel.textContent = `requested: ${value}`;
-  controlScheduler.schedule(name, value);
-  setTag("dirtyBadge", "DIRTY", false, true);
+function controlDependencyHidden(name, controls) {
+  const dependency = {
+    white_balance_temperature: "white_balance_automatic",
+    exposure_absolute: "exposure_auto",
+    focus_absolute: "focus_auto",
+  }[name];
+  if (!dependency || !controls[dependency]) return false;
+  const autoInfo = controls[dependency];
+  return automaticModeEnabled(dependency, effectiveControlValue(dependency, autoInfo), autoInfo);
+}
+
+function makeSliderModel(info) {
+  const choices = normalizedChoices(info);
+  if (choices.length) {
+    const values = choices.map((choice) => choice.value);
+    return {
+      minimum: 0,
+      maximum: values.length - 1,
+      step: 1,
+      toPosition(value) {
+        const exact = values.indexOf(Number(value));
+        if (exact >= 0) return exact;
+        return values.reduce(
+          (best, candidate, index) => Math.abs(candidate - Number(value)) < best.distance
+            ? {index, distance: Math.abs(candidate - Number(value))}
+            : best,
+          {index: 0, distance: Infinity},
+        ).index;
+      },
+      fromPosition(position) {
+        const index = quantizeControlValue(position, 0, values.length - 1, 1);
+        return values[index];
+      },
+    };
+  }
+  return {
+    minimum: Number(info.minimum),
+    maximum: Number(info.maximum),
+    step: Number(info.step),
+    toPosition(value) {
+      return quantizeControlValue(value, this.minimum, this.maximum, this.step);
+    },
+    fromPosition(position) {
+      return quantizeControlValue(position, this.minimum, this.maximum, this.step);
+    },
+  };
+}
+
+function installRepeatingButton(button, previewByOneStep, commitPreview) {
+  let holdTimer = null;
+  let repeatTimer = null;
+  let repeated = false;
+
+  const stopTimers = () => {
+    clearTimeout(holdTimer);
+    clearInterval(repeatTimer);
+    holdTimer = null;
+    repeatTimer = null;
+  };
+  button.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    stopTimers();
+    repeated = false;
+    holdTimer = setTimeout(() => {
+      repeated = true;
+      if (!previewByOneStep()) return;
+      repeatTimer = setInterval(() => {
+        if (!previewByOneStep()) stopTimers();
+      }, 150);
+    }, 400);
+  });
+  ["pointerup", "pointercancel", "pointerleave"].forEach((eventName) => {
+    button.addEventListener(eventName, () => {
+      stopTimers();
+      if (repeated) commitPreview();
+    });
+  });
+  button.addEventListener("click", (event) => {
+    if (repeated) {
+      event.preventDefault();
+      repeated = false;
+      return;
+    }
+    if (previewByOneStep()) commitPreview();
+  });
+}
+
+function installTouchRange(input, row, model, initialRawValue, setVisualValue, commitValue) {
+  let gesture = null;
+  let suppressTouchClickUntil = 0;
+
+  const releaseCapture = (pointerId) => {
+    try {
+      if (input.hasPointerCapture(pointerId)) input.releasePointerCapture(pointerId);
+    } catch (_error) {
+      // pointercancel后浏览器可能已自动释放。
+    }
+  };
+  const cleanup = (pointerId) => {
+    releaseCapture(pointerId);
+    row.classList.remove("adjusting");
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerCancel);
+    gesture = null;
+  };
+  const valueAt = (clientX) => {
+    const rect = input.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(1, rect.width)));
+    return model.fromPosition(model.minimum + ratio * (model.maximum - model.minimum));
+  };
+  const onPointerMove = (event) => {
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    if (gesture.mode === "pending") {
+      gesture.mode = classifyPointerGesture(
+        event.clientX - gesture.startX,
+        event.clientY - gesture.startY,
+      );
+      if (gesture.mode === "horizontal") {
+        row.classList.add("adjusting");
+        try { input.setPointerCapture(event.pointerId); } catch (_error) { /* best effort */ }
+      }
+    }
+    if (gesture.mode === "horizontal") {
+      event.preventDefault();
+      gesture.previewRaw = valueAt(event.clientX);
+      setVisualValue(gesture.previewRaw);
+    } else {
+      setVisualValue(gesture.startRaw);
+    }
+  };
+  const onPointerUp = (event) => {
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    const completed = gesture;
+    suppressTouchClickUntil = performance.now() + 500;
+    if (completed.mode === "horizontal") {
+      event.preventDefault();
+      completed.previewRaw = valueAt(event.clientX);
+      setVisualValue(completed.previewRaw);
+      commitValue(completed.previewRaw);
+    } else {
+      setVisualValue(completed.startRaw);
+    }
+    cleanup(event.pointerId);
+  };
+  const onPointerCancel = (event) => {
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    setVisualValue(gesture.startRaw);
+    suppressTouchClickUntil = performance.now() + 500;
+    cleanup(event.pointerId);
+  };
+
+  input.addEventListener("pointerdown", (event) => {
+    if (!event.isPrimary || !["touch", "pen"].includes(event.pointerType)) return;
+    gesture = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startRaw: initialRawValue(),
+      previewRaw: initialRawValue(),
+      mode: "pending",
+    };
+    window.addEventListener("pointermove", onPointerMove, {passive: false});
+    window.addEventListener("pointerup", onPointerUp, {passive: false});
+    window.addEventListener("pointercancel", onPointerCancel);
+  });
+  input.addEventListener("input", (event) => {
+    if (!gesture) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    setVisualValue(gesture.mode === "horizontal" ? gesture.previewRaw : gesture.startRaw);
+  });
+  input.addEventListener("click", (event) => {
+    if (performance.now() >= suppressTouchClickUntil) return;
+    event.preventDefault();
+    setVisualValue(initialRawValue());
+  }, true);
+  return () => gesture;
 }
 
 async function applySingleControl(name, value) {
@@ -148,7 +323,7 @@ async function applySingleControl(name, value) {
     method: "PATCH",
     body: JSON.stringify({controls: {[name]: value}}),
   });
-  await waitForCommand(queued.command_id, `设置 ${name}`);
+  await waitForCommand(queued.command_id, `设置${controlDisplayName(name)}`);
   const synchronized = await request("/api/config/camera");
   return synchronized.camera;
 }
@@ -161,78 +336,111 @@ function buildControl(name, info, controls) {
   const head = document.createElement("div");
   head.className = "control-head";
   const title = document.createElement("strong");
-  title.textContent = name;
-  const requested = document.createElement("span");
-  requested.className = "requested";
-  requested.dataset.role = "requested";
-  const desiredValue = controlScheduler.desiredValue(name);
-  requested.textContent = `requested: ${desiredValue ?? info.requested ?? "—"}`;
-  head.append(title, requested);
+  const displayName = controlDisplayName(name);
+  title.textContent = displayName;
+  const valueLabel = document.createElement("span");
+  valueLabel.className = "control-value";
+  valueLabel.dataset.role = "value";
+  let confirmedRawValue = effectiveControlValue(name, info);
+  let displayedRawValue = confirmedRawValue;
+  valueLabel.textContent = formatControlValue(name, confirmedRawValue, info);
+  head.append(title, valueLabel);
 
   const inputs = document.createElement("div");
   inputs.className = "control-inputs";
   const minus = document.createElement("button");
   minus.type = "button";
   minus.textContent = "−";
-  minus.setAttribute("aria-label", `${name}减少`);
+  minus.setAttribute("aria-label", `${displayName}减少`);
   const input = document.createElement("input");
   input.type = "range";
   input.dataset.controlInput = name;
-  input.min = info.minimum ?? 0;
-  input.max = info.maximum ?? 1;
-  input.step = info.step || 1;
-  input.value = desiredValue ?? info.requested ?? info.actual ?? input.min;
+  input.setAttribute("aria-label", `${displayName}滑动调整`);
+  const slider = makeSliderModel(info);
+  input.min = slider.minimum;
+  input.max = slider.maximum;
+  input.step = slider.step;
+  input.value = slider.toPosition(confirmedRawValue);
   const plus = document.createElement("button");
   plus.type = "button";
   plus.textContent = "+";
-  plus.setAttribute("aria-label", `${name}增加`);
-  const disabledReason = controlDisabledReason(name, controls);
-  const disabled = !info.supported || !!disabledReason;
-  input.disabled = minus.disabled = plus.disabled = disabled;
-  const changeBy = (direction) => {
-    const next = Math.min(
-      Number(input.max),
-      Math.max(Number(input.min), Number(input.value) + direction * Number(input.step || 1)),
-    );
-    queueControlUpdate(name, next, input, requested);
-  };
-  minus.addEventListener("click", () => changeBy(-1));
-  plus.addEventListener("click", () => changeBy(1));
-  input.addEventListener("input", () => queueControlUpdate(name, Number(input.value), input, requested));
-  inputs.append(minus, input, plus);
+  plus.setAttribute("aria-label", `${displayName}增加`);
 
-  const foot = document.createElement("div");
-  foot.className = "control-foot";
-  const actual = document.createElement("span");
-  actual.dataset.role = "actual";
-  actual.textContent = `actual: ${info.actual ?? "—"} · ${info.minimum ?? "—"}..${info.maximum ?? "—"}`;
-  const badges = document.createElement("span");
-  badges.className = "control-badges";
-  const supportBadge = document.createElement("span");
-  supportBadge.className = `mini-badge${info.supported ? "" : " bad"}`;
-  supportBadge.textContent = info.supported ? "SUPPORTED" : "UNSUPPORTED";
-  badges.append(supportBadge);
-  if (info.mismatch) {
-    const mismatch = document.createElement("span");
-    mismatch.className = "mini-badge bad";
-    mismatch.textContent = "MISMATCH";
-    badges.append(mismatch);
+  const diagnostic = document.createElement("div");
+  diagnostic.className = "control-diagnostic";
+  diagnostic.dataset.role = "diagnostic";
+  const setDiagnostic = (message, failed = false) => {
+    diagnostic.textContent = message;
+    diagnostic.hidden = !message;
+    diagnostic.classList.toggle("failed", failed);
+  };
+  const setVisualValue = (rawValue) => {
+    displayedRawValue = rawValue;
+    input.value = slider.toPosition(rawValue);
+    valueLabel.textContent = formatControlValue(name, rawValue, info);
+  };
+  const commitValue = (rawValue) => {
+    const normalized = slider.fromPosition(slider.toPosition(rawValue));
+    if (normalized === confirmedRawValue && controlScheduler.desiredValue(name) === undefined) {
+      setVisualValue(normalized);
+      return false;
+    }
+    confirmedRawValue = normalized;
+    displayedRawValue = normalized;
+    controlFailures.delete(name);
+    setVisualValue(normalized);
+    setDiagnostic("正在应用");
+    row.classList.add("pending");
+    controlScheduler.schedule(name, normalized);
+    setTag("dirtyBadge", "DIRTY", false, true);
+    return true;
+  };
+  const changeBy = (direction) => {
+    const currentPosition = slider.toPosition(displayedRawValue);
+    const nextPosition = quantizeControlValue(
+      currentPosition + direction * slider.step,
+      slider.minimum,
+      slider.maximum,
+      slider.step,
+    );
+    if (nextPosition === currentPosition) return false;
+    setVisualValue(slider.fromPosition(nextPosition));
+    return true;
+  };
+  installRepeatingButton(minus, () => changeBy(-1), () => commitValue(displayedRawValue));
+  installRepeatingButton(plus, () => changeBy(1), () => commitValue(displayedRawValue));
+  const activeTouchGesture = installTouchRange(
+    input,
+    row,
+    slider,
+    () => confirmedRawValue,
+    setVisualValue,
+    commitValue,
+  );
+  input.addEventListener("input", () => {
+    if (!activeTouchGesture()) commitValue(slider.fromPosition(Number(input.value)));
+  });
+  inputs.append(minus, input, plus);
+  const failure = controlFailures.get(name);
+  const desired = controlScheduler.desiredValue(name) ?? info.requested;
+  const phase = controlScheduler.phase(name);
+  if (failure || info.last_success === false) {
+    setDiagnostic("应用失败", true);
+  } else if (["DEBOUNCE", "SENT"].includes(phase)) {
+    setDiagnostic("正在应用");
+    row.classList.add("pending");
+  } else if (info.mismatch || (
+    desired !== null && desired !== undefined && info.actual !== null && info.actual !== undefined
+    && Number(desired) !== Number(info.actual)
+  )) {
+    setDiagnostic(
+      `设置值：${formatControlValue(name, desired, info)}　实际值：${formatControlValue(name, info.actual, info)}`,
+    );
+  } else {
+    setDiagnostic("");
+    row.classList.remove("pending");
   }
-  if (info.last_success === false) {
-    const failed = document.createElement("span");
-    failed.className = "mini-badge bad";
-    failed.textContent = "FAILED";
-    badges.append(failed);
-  }
-  foot.append(actual, badges);
-  row.append(head, inputs, foot);
-  const errorText = disabledReason || info.error;
-  if (errorText) {
-    const error = document.createElement("div");
-    error.className = "control-error";
-    error.textContent = errorText;
-    row.append(error);
-  }
+  row.append(head, inputs, diagnostic);
   return row;
 }
 
@@ -245,10 +453,16 @@ function renderCurrentProfile() {
 
 function renderCameraControls() {
   const container = $("cameraControls");
+  const previousScrollTop = container.scrollTop;
+  cameraControlsRenderCount += 1;
   container.replaceChildren();
+  const visible = Object.entries(cameraControlsState).filter(([name, info]) => (
+    controlIsWritable(name, info) && !controlDependencyHidden(name, cameraControlsState)
+  ));
+  const visibleNames = new Set(visible.map(([name]) => name));
   const rendered = new Set();
   CONTROL_GROUPS.forEach(([label, names]) => {
-    const available = names.filter((name) => cameraControlsState[name]);
+    const available = names.filter((name) => visibleNames.has(name));
     if (!available.length) return;
     const group = document.createElement("section");
     group.className = "control-group";
@@ -261,13 +475,33 @@ function renderCameraControls() {
     });
     container.append(group);
   });
-  Object.entries(cameraControlsState).forEach(([name, info]) => {
-    if (!rendered.has(name)) container.append(buildControl(name, info, cameraControlsState));
-  });
+  const other = visible.filter(([name]) => !rendered.has(name));
+  if (other.length) {
+    const group = document.createElement("section");
+    group.className = "control-group other-controls";
+    const heading = document.createElement("h3");
+    heading.textContent = "其他参数";
+    group.append(heading);
+    other.forEach(([name, info]) => group.append(buildControl(name, info, cameraControlsState)));
+    container.append(group);
+  }
+  if (!visible.length) {
+    const empty = document.createElement("p");
+    empty.className = "controls-empty";
+    empty.textContent = "当前摄像头没有可调参数";
+    container.append(empty);
+  }
+  container.scrollTop = Math.min(
+    previousScrollTop,
+    Math.max(0, container.scrollHeight - container.clientHeight),
+  );
 }
 
 function replaceCameraControlState(camera, {resetScheduler = false} = {}) {
-  if (resetScheduler) controlScheduler.reset();
+  if (resetScheduler) {
+    controlScheduler.reset();
+    controlFailures.clear();
+  }
   const source = camera.controls || {};
   cameraControlsState = Object.fromEntries(
     Object.entries(source).map(([name, info]) => [name, {...info}]),
@@ -482,6 +716,7 @@ window.__visionTouchTest = {
   controlScheduler,
   vmcTxTracker,
   waitForCommand,
+  getCameraControlsRenderCount: () => cameraControlsRenderCount,
 };
 
 pollStatus();

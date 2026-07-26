@@ -285,12 +285,13 @@ class VisionRuntime:
             item = info[name]
             item["requested"] = requested.get(name)
             item["last_success"] = None
+            item["setter_supported"] = name in ALLOWED_CONTROLS
             item["mismatch"] = (
                 item.get("actual") is not None
                 and item.get("requested") is not None
                 and item["actual"] != item["requested"]
             )
-            item["disabled"] = not item["supported"]
+            item["disabled"] = not item["supported"] or not item.get("writable", False)
         self.state_store.update(camera_controls=info)
 
     def _validate_control(self, name: str, value: int) -> dict[str, Any]:
@@ -340,6 +341,12 @@ class VisionRuntime:
             self._runtime_overrides[name] = value
             self._modified_controls.add(name)
             self.state_store.update(runtime_modified=True)
+        if not self._restoring_controls and name in {
+            "white_balance_automatic",
+            "exposure_auto",
+            "focus_auto",
+        }:
+            self._refresh_camera_controls()
         LOG.info("V4L2现场参数 %s requested=%s actual=%s", name, value, actual)
 
     def _switch_detector(self, name: str) -> None:

@@ -14,6 +14,8 @@ WEB_ROOT = ROOT / "touch_ui_web"
 CONTROLS = {
     "brightness": {
         "supported": True,
+        "writable": True,
+        "type": "int",
         "minimum": -64,
         "maximum": 64,
         "step": 1,
@@ -23,6 +25,8 @@ CONTROLS = {
     },
     "contrast": {
         "supported": True,
+        "writable": True,
+        "type": "int",
         "minimum": 0,
         "maximum": 64,
         "step": 1,
@@ -32,6 +36,8 @@ CONTROLS = {
     },
     "gain": {
         "supported": True,
+        "writable": True,
+        "type": "int",
         "minimum": 0,
         "maximum": 255,
         "step": 1,
@@ -39,7 +45,61 @@ CONTROLS = {
         "actual": 7,
         "mismatch": False,
     },
+    "sharpness": {
+        "supported": True,
+        "writable": True,
+        "type": "int",
+        "minimum": 0,
+        "maximum": 10,
+        "step": 1,
+        "requested": 4,
+        "actual": 4,
+        "mismatch": False,
+    },
+    "white_balance_automatic": {
+        "supported": True,
+        "writable": True,
+        "type": "bool",
+        "minimum": 0,
+        "maximum": 1,
+        "step": 1,
+        "choices": [{"value": 0, "label": "Off"}, {"value": 1, "label": "On"}],
+        "requested": 1,
+        "actual": 1,
+        "mismatch": False,
+    },
+    "white_balance_temperature": {
+        "supported": True,
+        "writable": True,
+        "type": "int",
+        "minimum": 2500,
+        "maximum": 7000,
+        "step": 100,
+        "requested": 5000,
+        "actual": 5000,
+        "mismatch": False,
+    },
+    "saturation": {
+        "supported": False,
+        "writable": False,
+        "type": "int",
+        "minimum": 0,
+        "maximum": 100,
+        "step": 1,
+        "actual": 36,
+    },
+    "gamma": {
+        "supported": True,
+        "writable": False,
+        "read_only": True,
+        "type": "int",
+        "minimum": 1,
+        "maximum": 500,
+        "step": 1,
+        "actual": 100,
+    },
 }
+COMMANDS: dict[str, dict] = {}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -68,7 +128,7 @@ class Handler(BaseHTTPRequestHandler):
                         "detector": "digit",
                         "state": "LOCKED",
                         "fps": 30,
-                        "commands": {},
+                        "commands": COMMANDS,
                         "ui": {"parameter_debounce_ms": 20},
                     },
                 }
@@ -105,6 +165,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def do_PATCH(self) -> None:
+        if urlsplit(self.path).path != "/api/config/camera":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        name, value = next(iter(payload["controls"].items()))
+        CONTROLS[name]["requested"] = value
+        CONTROLS[name]["actual"] = value
+        command_id = f"command-{len(COMMANDS) + 1}"
+        COMMANDS[command_id] = {"status": "APPLIED"}
+        self._json({"ok": True, "command_id": command_id, "status": "QUEUED"})
 
 
 def main() -> None:
