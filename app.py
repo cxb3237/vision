@@ -563,16 +563,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.digit_config,
             )
 
+        # 比赛视觉输出是启动安全开关：只接受本次命令行的明确授权。
         competition_mode = bool(args.competition_mode)
-        if touch_config is not None and not competition_mode:
-            if touch_config.restore_runtime_overrides:
-                competition_mode = bool(
-                    restored_ui_state.get(
-                        "competition_mode", touch_config.startup_competition_mode
-                    )
-                )
-            else:
-                competition_mode = touch_config.startup_competition_mode
         return run_application(
             args,
             mission,

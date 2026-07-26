@@ -36,10 +36,13 @@ PROJECT_CONFIG = Path(__file__).resolve().parents[1] / "config/touch_ui.yaml"
 class FakeDetector:
     target_class = 1
 
-    def __init__(self, *, fail_initialize: bool = False) -> None:
+    def __init__(self, *, fail_initialize: bool = False, target_class: int = 1) -> None:
         self.initialize_count = 0
         self.reset_count = 0
+        self.process_count = 0
+        self.draw_count = 0
         self.fail_initialize = fail_initialize
+        self.target_class = target_class
 
     def initialize(self) -> None:
         self.initialize_count += 1
@@ -50,13 +53,14 @@ class FakeDetector:
         self.reset_count += 1
 
     def process(self, frame: FramePacket) -> VisionResult:
+        self.process_count += 1
         return VisionResult(
             frame.frame_id,
             frame.capture_timestamp,
             time.monotonic(),
             found=True,
             target_state=TargetState.LOCKED,
-            target_class=1,
+            target_class=self.target_class,
             center_x=10,
             center_y=10,
             confidence=900,
@@ -65,6 +69,7 @@ class FakeDetector:
         )
 
     def draw_debug(self, image, _result):
+        self.draw_count += 1
         return image.copy()
 
 
@@ -96,10 +101,14 @@ class FakeCamera:
 class FakeSerial:
     enabled = False
 
-    def __init__(self) -> None:
+    def __init__(self, *, online: bool | None = None) -> None:
+        if online is not None:
+            self.enabled = online
         self.start_count = 0
         self.stop_count = 0
         self.published = []
+        self.pending_result = None
+        self.discard_count = 0
 
     def start(self) -> None:
         self.start_count += 1
@@ -111,14 +120,19 @@ class FakeSerial:
         return None
 
     def get_statistics(self):
-        return {"port_open": False, "tx_count": len(self.published)}
+        return {"port_open": self.enabled, "tx_count": len(self.published)}
 
     def send_packet(self, *_args, **_kwargs):
         return False
 
     def publish_result(self, result, detector_id, **_kwargs):
         self.published.append((result, detector_id))
+        self.pending_result = (result, detector_id)
         return True
+
+    def discard_pending_result(self):
+        self.discard_count += 1
+        self.pending_result = None
 
 
 def _touch_config(tmp_path: Path):
@@ -134,13 +148,17 @@ def _runtime(
     detector_factory=None,
     touch=True,
     args=None,
+    initial_competition_mode=False,
+    detector_id="color",
 ) -> VisionRuntime:
     detector = detector or FakeDetector()
     camera = camera or FakeCamera(finished=True)
     serial = serial or FakeSerial()
     mission = load_mission_config()
     processor = ControlProcessor(
-        VisionStateMachine(VisionMode.TRACK), TargetTracker(), supported_target_class=1
+        VisionStateMachine(VisionMode.TRACK),
+        TargetTracker(),
+        supported_target_class=detector.target_class,
     )
     return VisionRuntime(
         args=args or Namespace(mode="track", display=False, headless=True),
@@ -148,16 +166,17 @@ def _runtime(
         detector=detector,
         camera_service=camera,
         serial_service=serial,
-        detector_id="color",
+        detector_id=detector_id,
         camera_calibrated=False,
         control_processor=processor,
         control_handler=_handle_control_messages,
         display_handler=_handle_display,
         save_debug_frame=_save_debug_frame,
         detector_factory=detector_factory,
-        current_detector_name="color",
+        current_detector_name=detector_id,
         camera_config=load_camera_config(),
         touch_config=_touch_config(tmp_path) if touch else None,
+        initial_competition_mode=initial_competition_mode,
     )
 
 
@@ -201,6 +220,39 @@ def test_touch_port_cli_explicitly_overrides_yaml(tmp_path) -> None:
         ]
     )
     assert app.resolve_touch_ui_config(args, project_root=tmp_path).port == 8765
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [([], False), (["--competition-mode"], True)],
+)
+def test_startup_competition_mode_requires_explicit_cli_flag(
+    tmp_path, monkeypatch, extra_args, expected
+) -> None:
+    captured = {}
+    monkeypatch.setattr(app, "resolve_touch_ui_config", lambda _args: _touch_config(tmp_path))
+    monkeypatch.setattr(app, "configure_touch_logging", lambda: None)
+    monkeypatch.setattr(
+        app.RuntimeConfigStore,
+        "load_ui_state",
+        lambda _self: {"competition_mode": True, "detector": "color"},
+    )
+    monkeypatch.setattr(app, "create_detector", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(app, "create_camera_source", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(app, "SerialService", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        app,
+        "load_calibration_config",
+        lambda *_args, **_kwargs: Namespace(calibrated=False),
+    )
+
+    def fake_run_application(*_args, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(app, "run_application", fake_run_application)
+    assert app.main(["--touch-ui", "--detector", "color", "--no-serial", *extra_args]) == 0
+    assert captured["initial_competition_mode"] is expected
 
 
 def test_create_camera_source_constructs_only_one_camera_service(monkeypatch) -> None:
@@ -256,15 +308,110 @@ def test_command_queue_coalesces_same_parameter_only() -> None:
 
 
 def test_competition_mode_is_checked_in_backend(tmp_path) -> None:
-    runtime = _runtime(tmp_path)
+    serial = FakeSerial()
+    runtime = _runtime(tmp_path, serial=serial)
     enter = RuntimeCommand.create(CommandType.ENTER_COMPETITION)
     runtime._execute_command(enter)
+    assert runtime.get_status_snapshot()["vision_output_enabled"]
+    assert serial.discard_count == 1
     with pytest.raises(RuntimeError, match="比赛模式"):
         runtime.submit_command(CommandType.SELECT_DETECTOR, {"detector": "digit"})
     exit_id = runtime.submit_command(CommandType.EXIT_COMPETITION)
     runtime.process_pending_commands()
     assert runtime.get_status_snapshot()["commands"][exit_id]["status"] == "APPLIED"
     assert not runtime.get_status_snapshot()["competition_mode"]
+    assert not runtime.get_status_snapshot()["vision_output_enabled"]
+    assert serial.discard_count == 2
+
+
+def test_debug_mode_keeps_detection_and_preview_but_does_not_publish(tmp_path) -> None:
+    frame = FramePacket(1, time.monotonic(), np.zeros((30, 40, 3), np.uint8))
+    detector = FakeDetector(target_class=103)
+    camera = FakeCamera([frame], finished=False)
+    serial = FakeSerial(online=True)
+    runtime = _runtime(
+        tmp_path,
+        detector=detector,
+        camera=camera,
+        serial=serial,
+        detector_id="digit",
+    )
+    thread = threading.Thread(target=runtime.run_forever)
+    thread.start()
+    deadline = time.monotonic() + 1.0
+    while (
+        runtime.get_status_snapshot()["target_class"] != 103
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
+    status = runtime.get_status_snapshot()
+    runtime.request_stop()
+    thread.join(1.0)
+    assert not thread.is_alive()
+    assert detector.process_count == detector.draw_count == 1
+    assert serial.published == []
+    assert status["target_class"] == 103
+    assert status["camera_online"] and status["serial_online"]
+    assert not status["vision_output_enabled"]
+
+
+def test_competition_mode_publishes_digit_result_and_reports_output_enabled(
+    tmp_path,
+) -> None:
+    frame = FramePacket(7, time.monotonic(), np.zeros((30, 40, 3), np.uint8))
+    detector = FakeDetector(target_class=108)
+    serial = FakeSerial(online=True)
+    runtime = _runtime(
+        tmp_path,
+        detector=detector,
+        camera=FakeCamera([frame], finished=True),
+        serial=serial,
+        detector_id="digit",
+        initial_competition_mode=True,
+    )
+    assert runtime.run_forever() == 0
+    assert len(serial.published) == 1
+    result, detector_id = serial.published[0]
+    assert detector_id == "digit" and 100 <= result.target_class <= 109
+    assert runtime.get_status_snapshot()["vision_output_enabled"]
+
+
+def test_exiting_competition_discards_pending_and_blocks_following_frames(
+    tmp_path,
+) -> None:
+    serial = FakeSerial()
+    serial.pending_result = "old"
+    runtime = _runtime(
+        tmp_path,
+        camera=FakeCamera(
+            [FramePacket(2, time.monotonic(), np.zeros((20, 20, 3), np.uint8))],
+            finished=True,
+        ),
+        serial=serial,
+        initial_competition_mode=True,
+    )
+    runtime._set_competition(False)
+    assert serial.pending_result is None and serial.discard_count == 1
+    runtime.run_forever()
+    assert serial.published == []
+
+
+def test_entering_competition_discards_old_result_and_only_publishes_new_frame(
+    tmp_path,
+) -> None:
+    serial = FakeSerial()
+    serial.pending_result = "before-competition"
+    frame = FramePacket(9, time.monotonic(), np.zeros((20, 20, 3), np.uint8))
+    runtime = _runtime(
+        tmp_path,
+        camera=FakeCamera([frame], finished=True),
+        serial=serial,
+    )
+    runtime._set_competition(True)
+    assert serial.pending_result is None and serial.discard_count == 1
+    runtime.run_forever()
+    assert len(serial.published) == 1
+    assert serial.published[0][0].frame_id == 9
 
 
 def test_detector_switch_failure_keeps_old_detector(tmp_path) -> None:
@@ -572,7 +719,11 @@ def test_request_stop_models_ctrl_c_and_systemd_shutdown(tmp_path) -> None:
 class ServerRuntime:
     def __init__(self) -> None:
         self.frame_stream = LatestFrameStream()
-        self.state = {"runtime_running": True, "competition_mode": False}
+        self.state = {
+            "runtime_running": True,
+            "competition_mode": False,
+            "vision_output_enabled": False,
+        }
         self.stop_requests = 0
 
     def get_status_snapshot(self):

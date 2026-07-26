@@ -37,6 +37,8 @@ function createServer({patchFailure = false, applyDelayMs = 0, controlOverrides 
     commands: {},
     patches: [],
     nextCommand: 1,
+    competitionMode: false,
+    visionOutputEnabled: false,
   };
   Object.entries(controlOverrides).forEach(([name, override]) => {
     state.controls[name] = {...state.controls[name], ...override};
@@ -50,7 +52,7 @@ function createServer({patchFailure = false, applyDelayMs = 0, controlOverrides 
           delete command.appliedAt;
         }
       });
-      json(response, {ok: true, status: {runtime_running: true, camera_online: true, serial_online: true, vmc_tx_count: 3, detector: "digit", state: "LOCKED", fps: 30, commands: state.commands, ui: {parameter_debounce_ms: 20}}});
+      json(response, {ok: true, status: {runtime_running: true, camera_online: true, serial_online: true, vmc_tx_count: 3, detector: "digit", state: "LOCKED", fps: 30, competition_mode: state.competitionMode, vision_output_enabled: state.visionOutputEnabled, commands: state.commands, ui: {parameter_debounce_ms: 20}}});
       return;
     }
     if (pathname === "/api/config/camera") {
@@ -102,6 +104,26 @@ function launchBrowser() {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   return chromium.launch({headless: true, ...(executablePath ? {executablePath} : {})});
 }
+
+test("vision output status is independent from UART online state", {timeout: 30000}, async (context) => {
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const browser = await launchBrowser();
+  context.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  const page = await browser.newPage({viewport: {width: 800, height: 480}});
+  await page.goto(`http://127.0.0.1:${server.address().port}/`, {waitUntil: "domcontentloaded"});
+  await page.waitForFunction(() => document.querySelector("#competitionBadge").textContent.includes("调试识别"));
+  assert.equal(await page.locator("#serialBadge").innerText(), "UART ONLINE");
+  assert.equal(await page.locator("#competitionBadge").innerText(), "调试识别 · 不下发控制");
+
+  server.fixtureState.competitionMode = true;
+  server.fixtureState.visionOutputEnabled = true;
+  await page.waitForFunction(() => document.querySelector("#competitionBadge").textContent.includes("比赛识别有效"));
+  assert.equal(await page.locator("#competitionBadge").innerText(), "比赛识别有效 · 正在向小车发送");
+});
 
 async function dispatchPointer(page, targetSelector, type, options) {
   return page.evaluate(({targetSelector, type, options}) => {

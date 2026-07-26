@@ -98,7 +98,8 @@ class RuntimeConfigStore:
         self._atomic_write(
             self.config.ui_state_file,
             {
-                "competition_mode": bool(competition_mode),
+                # 比赛输出属于每次进程启动时的安全开关，不跨重启恢复。
+                "competition_mode": False,
                 "detector": str(detector),
                 "saved_wall_time": time.time(),
             },

@@ -100,6 +100,28 @@ def test_latest_result_replaces_old_pending_result() -> None:
     assert service.get_statistics()["result_replacements"] == 5
 
 
+def test_discard_pending_result_is_thread_safe_and_preserves_sequence() -> None:
+    fake = BlockingReadSerial()
+    service = SerialService(
+        "fake",
+        serial_factory=lambda *_args, **_kwargs: fake,
+        send_rate_hz=20,
+    )
+    service.start()
+    assert fake.read_entered.wait(1.0)
+    with service._result_lock:
+        service._result_sequence = 17
+    assert service.publish_result(vision(3), "digit")
+    service.discard_pending_result()
+    assert service.get_statistics()["result_sequence"] == 17
+    with service._result_lock:
+        assert service._latest_result is None
+    fake.release_read.set()
+    time.sleep(0.08)
+    service.stop()
+    assert fake.written == []
+
+
 def test_result_sequence_wraps_at_uint16() -> None:
     fake = FakeSerial()
     service = SerialService(

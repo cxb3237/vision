@@ -22,7 +22,12 @@ ROOT = Path(__file__).resolve().parents[1]
 class _Runtime:
     def __init__(self) -> None:
         self.store = StateStore(
-            {"runtime_running": True, "competition_mode": False, "detector": "digit"}
+            {
+                "runtime_running": True,
+                "competition_mode": False,
+                "vision_output_enabled": False,
+                "detector": "digit",
+            }
         )
         self.commands = []
         self.camera = {
@@ -67,7 +72,7 @@ def run_selftest() -> None:
         persistence.save_camera_override({"brightness": 25})
         assert persistence.load_camera_override() == {"brightness": 25}
         persistence.save_ui_state(True, "digit")
-        assert persistence.load_ui_state()["competition_mode"] is True
+        assert persistence.load_ui_state()["competition_mode"] is False
         assert persistence.restore_baseline()
 
         stream = LatestFrameStream(max_fps=20, jpeg_quality=75, max_width=320)
@@ -79,7 +84,7 @@ def run_selftest() -> None:
         assert stream.get_latest_jpeg(placeholder=False)
         stream.stop()
 
-        runtime.store.update(competition_mode=True)
+        runtime.store.update(competition_mode=True, vision_output_enabled=True)
         assert api.patch_camera({"controls": {"brightness": 30}})[1][
             "error_code"
         ] == "COMPETITION_MODE"

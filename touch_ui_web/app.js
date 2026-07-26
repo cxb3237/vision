@@ -112,7 +112,13 @@ function renderStatus(status) {
   setTag("lockBadge", status.state || "NONE", status.state === "LOCKED", status.state !== "LOCKED");
   const dirty = !!status.runtime_modified || controlScheduler.hasPending();
   setTag("dirtyBadge", dirty ? "DIRTY" : "CLEAN", !dirty, dirty);
-  setTag("competitionBadge", status.competition_mode ? "COMPETITION" : "DEBUG", true, !!status.competition_mode);
+  const visionOutputEnabled = !!status.vision_output_enabled;
+  setTag(
+    "competitionBadge",
+    visionOutputEnabled ? "比赛识别有效 · 正在向小车发送" : "调试识别 · 不下发控制",
+    true,
+    visionOutputEnabled,
+  );
   $("normalDock").hidden = !!status.competition_mode;
   $("competitionDock").hidden = !status.competition_mode;
   document.querySelectorAll("[data-detector]").forEach((button) => {

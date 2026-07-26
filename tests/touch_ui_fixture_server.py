@@ -124,6 +124,8 @@ class Handler(BaseHTTPRequestHandler):
                         "runtime_running": True,
                         "camera_online": True,
                         "serial_online": True,
+                        "competition_mode": False,
+                        "vision_output_enabled": False,
                         "vmc_tx_count": 3,
                         "detector": "digit",
                         "state": "LOCKED",

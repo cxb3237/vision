@@ -36,7 +36,12 @@ def touch_config(tmp_path: Path):
 
 class FakeRuntime:
     def __init__(self) -> None:
-        self.state = {"runtime_running": True, "competition_mode": False, "detector": "digit"}
+        self.state = {
+            "runtime_running": True,
+            "competition_mode": False,
+            "vision_output_enabled": False,
+            "detector": "digit",
+        }
         self.config = {
             "controls": {
                 "brightness": {
@@ -207,6 +212,14 @@ def test_runtime_save_is_atomic_and_creates_backup(tmp_path) -> None:
     store.save_camera_override({"brightness": 20})
     assert store.load_camera_override() == {"brightness": 20}
     assert list(store.config.backup_directory.glob("camera_override-*.yaml"))
+
+
+def test_ui_state_never_persists_competition_output_as_enabled(tmp_path) -> None:
+    store = RuntimeConfigStore(touch_config(tmp_path))
+    store.save_ui_state(True, "digit")
+    state = store.load_ui_state()
+    assert state["competition_mode"] is False
+    assert state["detector"] == "digit"
 
 
 def test_atomic_save_failure_preserves_previous_file(tmp_path, monkeypatch) -> None:

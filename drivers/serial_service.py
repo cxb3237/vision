@@ -373,6 +373,12 @@ class SerialService:
             self._latest_result = snapshot
         return True
 
+    def discard_pending_result(self) -> None:
+        """丢弃尚未发送的固定视觉结果，不影响序号或串口生命周期。"""
+
+        with self._result_lock:
+            self._latest_result = None
+
     def raise_if_failed(self) -> None:
         """严格模式下把后台串口错误传播给主循环。"""
 

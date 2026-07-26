@@ -133,6 +133,7 @@ class VisionRuntime:
                 "mode": control_processor.state_machine.mode.name,
                 "runtime_modified": False,
                 "competition_mode": bool(initial_competition_mode),
+                "vision_output_enabled": bool(initial_competition_mode),
                 "last_error": "",
                 "camera_controls": {},
                 "ui": {
@@ -369,10 +370,22 @@ class VisionRuntime:
         LOG.info("检测器已切换: %s", name)
 
     def _set_competition(self, enabled: bool) -> None:
-        self.state_store.update(competition_mode=enabled)
+        if enabled:
+            self.serial_service.discard_pending_result()
+            self.state_store.update(
+                competition_mode=True,
+                vision_output_enabled=True,
+            )
+            LOG.info("比赛模式视觉输出已启用。")
+        else:
+            self.state_store.update(
+                competition_mode=False,
+                vision_output_enabled=False,
+            )
+            self.serial_service.discard_pending_result()
+            LOG.info("比赛模式视觉输出已禁用。")
         if self.persistence is not None:
             self.persistence.save_ui_state(enabled, self.current_detector_name)
-        LOG.info("%s比赛模式", "进入" if enabled else "退出")
 
     @staticmethod
     def _ordered_control_names(values: dict[str, int]) -> list[str]:
@@ -588,6 +601,9 @@ class VisionRuntime:
             serial_online=serial_online,
             vmc_tx_count=int(serial_stats.get("tx_count", 0)),
             mode=self.control_processor.state_machine.mode.name,
+            vision_output_enabled=bool(
+                self.state_store.snapshot().get("competition_mode", False)
+            ),
         )
 
     def _reapply_overrides_after_reconnect(self, camera_stats: dict[str, Any]) -> None:
@@ -697,7 +713,10 @@ class VisionRuntime:
                         LOG.exception("检测器处理失败")
                     process_time_total += time.monotonic() - process_start
                     processed += 1
-                    if result is not None:
+                    if (
+                        result is not None
+                        and self.state_store.snapshot().get("competition_mode", False)
+                    ):
                         self.serial_service.publish_result(
                             result,
                             self.detector_id,
