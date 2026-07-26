@@ -395,6 +395,153 @@ MSPM0端可直接移植`mcu_reference/vmc_link.c`和`vmc_link.h`。该解析器�
 录制元数据使用增量 `metadata.jsonl`，避免长时间录制把全部记录保留在内存。每帧分别记录
 容器 FPS 和实时采集 FPS；两者含义不同。视频帧尺寸在录制过程中发生变化会立即报错停止。
 
+## 触摸屏现场调试界面
+
+第一版触摸界面是视觉进程内的本地Web服务。`VisionRuntime`独占一个`CameraService`、当前检测器
+和VMC-Link串口服务；网页线程只能读取不可变状态快照、读取最新JPEG缓存以及向有界命令队列
+投递请求，不会创建第二个摄像头或直接执行V4L2操作。前端为项目内的原生HTML/CSS/JavaScript，
+无CDN、Node.js、数据库或互联网依赖。
+
+界面采用固定`100dvh`的一屏布局：横屏左侧始终显示完整、等比例的摄像头预览，右侧为紧凑状态
+与参数side dock；竖屏时预览在上、dock在下。页面主体不滚动，参数列表只在dock内部滚动。参数
+把手位于dock固定标题栏的独立48×48按钮槽内，点击或向左/向右拖动超过约40%可打开/关闭抽屉；
+打开和关闭时都不会覆盖状态文字、参数按钮或摄像头有效区域。
+
+### 安装与手动启动
+
+在Raspberry Pi 5项目目录内创建虚拟环境并安装已有依赖：
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r requirements.txt
+sudo apt install v4l-utils chromium curl
+```
+
+GPIO UART使用`/dev/ttyAMA0`时，推荐启动命令为：
+
+```bash
+python3 app.py \
+  --mode track \
+  --detector digit \
+  --digit-config config/digit.yaml \
+  --serial-port /dev/ttyAMA0 \
+  --baudrate 115200 \
+  --serial-rate 20 \
+  --touch-ui \
+  --headless
+```
+
+然后在同机Chromium访问：[http://127.0.0.1:8765](http://127.0.0.1:8765)。`--touch-ui`和
+`--display`不能同时使用，`--headless`确保不创建任何OpenCV窗口。默认只监听回环地址；如需局域网
+访问，应明确评估现场网络后再使用`--touch-host`覆盖。
+
+### 页面和现场参数
+
+主页显示标注预览、检测器、类别、状态、置信度、中心和误差、FPS、摄像头/串口状态及VMC发送
+计数。切换数字、颜色、形状或钢球检测器只替换运行时检测器，不会重启摄像头和串口；新检测器
+初始化失败时保留旧检测器。
+
+摄像头参数页根据`v4l2-ctl --list-ctrls-menus`实际结果，只显示当前摄像头支持且可写的控制项；
+不支持、只读、当前不可写、范围无效或缺少枚举选项的控制不会占用小屏幕空间。主面板使用中文
+名称和中文枚举值，正常状态只显示当前值与加减/滑动控件；仅在应用中、写入失败或回读不一致时
+显示紧凑诊断信息。Windows明确显示“当前平台不支持V4L2”。
+
+触摸滑动条采用方向锁定：上下移动优先滚动参数列表，只有明确横向拖动才改变参数，触摸单击轨道
+不会跳值；鼠标仍可点击或拖动轨道。加减按钮单击调整一个step，长按400毫秒后每150毫秒连续
+精调，松开或取消立即停止。所有修改仍进入原有命令队列，并由视觉线程按自动控制优先顺序调用
+现有V4L2模块。自动白平衡开启时隐藏白平衡色温，自动曝光开启时隐藏曝光时间；切换到手动模式并
+完成后端回读后，对应参数立即重新显示。
+
+“保存现场参数”把override原子写入`runtime/camera_override.yaml`，UI状态写入
+`runtime/touch_ui_state.yaml`，并在`runtime/backups/`保留有限数量备份。它不会覆盖
+`config/camera.yaml`、标定文件、检测器配置或数字模板。“恢复上次有效参数”回读override；
+“恢复基准参数”会把本次运行实际修改过的全部控制项恢复：启动时先保存摄像头所有受支持控制的
+实际值，再由`config/camera.yaml`中明确配置的值覆盖形成基准。恢复成功后停用override，基础YAML
+本身保持不变；因此即使`gain`等控制未写入基础YAML，也能恢复到程序启动时的实际值。
+
+保存、恢复上次有效参数和恢复基准参数都会等待后端命令进入`APPLIED`，再重新读取
+`GET /api/config/camera`并完整重建滑动条状态；`requested`、`actual`、范围、步进、支持状态和
+`MISMATCH`不会沿用恢复前的浏览器本地对象。命令进入`FAILED`时保留当前界面值并显示后端错误。
+
+比赛模式隐藏全部参数控件并由后端拒绝普通修改请求，摄像头、检测和VMC-Link继续运行。触摸屏需
+长按右上角维护按钮约2秒才能打开维护菜单，比赛模式下入口仍保留。退出比赛模式、退出kiosk和
+停止视觉服务都需要二次确认；普通点击不会执行危险操作。比赛模式用于防误触，不是身份认证。
+
+### systemd和kiosk自动启动
+
+这些脚本只应在Raspberry Pi Linux执行。Windows测试仅检查模板，不会调用`systemctl`或Chromium。
+
+```bash
+sudo bash deploy/install_touch_ui.sh \
+  --user "$USER" \
+  --project-dir "$(pwd)" \
+  --start
+```
+
+安装脚本验证`.venv`和`app.py`，从`config/touch_ui.yaml`读取并验证本地host/port，渲染
+`vision-touch.service`，把普通用户加入`video`和`dialout`组，启用systemd服务并生成带独立
+`VISION_TOUCH_URL`环境变量的XDG桌面自启动文件。kiosk URL只允许`localhost`或`127.0.0.1`，
+脚本不会执行YAML中的任意文本。组权限重新登录后生效。kiosk脚本等待配置端口的`/healthz`，
+再启动Chromium。Alt+F4或浏览器正常退出后脚本随即正常结束，不会重新打开窗口；只有非零异常
+退出才会延迟2秒重试，连续重试最多5次。桌面自动登录涉及现场
+安全策略，脚本不会擅自开启，请在Raspberry Pi图形桌面设置中手动启用目标普通用户的自动登录。
+
+`start_kiosk.sh`依次查找Chromium、Chrome和Firefox，并把浏览器PID原子写入
+`runtime/kiosk.pid`。Chrome/Chromium额外使用项目专用的`runtime/chrome-profile`，不会复用或
+修改用户普通Chrome配置，也能避免PID只指向短暂启动器。维护菜单“退出全屏界面”调用固定的
+`POST /api/kiosk/exit`：后端只接受该
+PID文件，验证当前用户、浏览器名称、`--kiosk`参数以及项目专用profile或本地URL后发送
+`SIGTERM`，客户端不能提交PID或任意命令。显式退出会先原子写入
+`runtime/kiosk.exit_requested`，因此脚本不会立即重启浏览器，视觉后端仍继续运行。需要手动重新
+打开时执行`deploy/start_kiosk.sh &`，也可重新登录桌面由XDG autostart启动；脚本每次新启动都会
+清除上次会话遗留的退出标志。
+
+维护菜单“停止视觉程序”调用无参数的`POST /api/runtime/stop`。响应发回页面后，运行时异步请求
+安全停止，由`VisionRuntime.stop`按既有生命周期释放预览线程、串口和唯一CameraService，正常
+退出码为0。systemd使用`Restart=on-failure`：崩溃会重启，UI正常停止不会立即重启，系统下次
+开机仍会因服务已enable而启动。
+
+systemd模板不写死检测器。启动检测器按“命令行明确值 > `runtime/touch_ui_state.yaml`保存值 >
+`config/touch_ui.yaml`的`startup.detector`”选择。最终检测器为`digit`时，安装脚本要求
+`data/digits/templates/0`到`9`每类至少有一张能被OpenCV读取的PNG，否则列出缺失数字并拒绝
+安装；不会生成虚假模板。数字模板必须在Raspberry Pi现场采集后同步进仓库或最终部署目录。
+可单独执行部署检查：
+
+```bash
+python3 -m tools.check_digit_templates --detector digit
+```
+
+查看与控制：
+
+```bash
+systemctl status vision-touch.service
+journalctl -u vision-touch.service -f
+tail -f logs/touch_ui.log
+sudo systemctl stop vision-touch.service
+sudo bash deploy/uninstall_touch_ui.sh --user "$USER"
+```
+
+轮转日志`logs/touch_ui.log`记录启动停止、检测器切换、参数请求/回读、保存恢复、比赛模式和Web
+错误，不逐帧写入。自检命令为：
+
+```bash
+python3 -m tools.touch_ui_selftest
+```
+
+常见问题：
+
+- 摄像头被占用：停止其他使用`/dev/video*`的程序，确认系统中只有一个视觉服务。
+- `/dev/ttyAMA0`权限不足：确认用户属于`dialout`组并重新登录；摄像头需要`video`组。
+- 浏览器没有自动打开：确认图形桌面已自动登录，并检查XDG autostart和`start_kiosk.sh`日志。
+- 页面有状态但没有画面：检查摄像头在线状态和`logs/touch_ui.log`；占位画面会在重连后自动恢复。
+- 摄像头参数不支持：这是设备能力差异，禁用项不会被伪装成设置成功。
+- 实际值与请求值不同：摄像头可能量化、拒绝或由自动控制改写；以页面回读实际值为准。
+- 触摸坐标方向不正确：在Raspberry Pi桌面/Wayland显示设置中同时校正显示旋转与触摸映射。
+- systemd服务循环重启：查看`journalctl -u vision-touch.service`，检查`.venv`、模板和配置。
+- 桌面没有自动登录：安装脚本不会修改登录策略，需在图形桌面设置中手工启用。
+- VMC-Link串口离线：确认`/dev/ttyAMA0`、波特率、TX/RX交叉、共地和3.3V电平。
+
 ## 建议调试顺序
 
 ```bash
