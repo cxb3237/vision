@@ -1,0 +1,20 @@
+description: Ultralytics YOLO26n model trained on E:\NUEDC\yolo_training_tools\data_windows_formal.yaml
+author: Ultralytics
+date: '2026-07-28T10:28:37.859488+08:00'
+version: 8.4.107
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 416
+- 416
+names:
+  0: steel_ball
+args:
+  batch: 1
+  quantize: null
+channels: 3
+end2end: false
