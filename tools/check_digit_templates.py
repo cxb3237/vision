@@ -39,7 +39,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--detector",
         required=True,
-        choices=("color", "shape", "steel_ball", "digit"),
+        choices=(
+            "color",
+            "shape",
+            "steel_ball",
+            "steel_ball_classical",
+            "steel_ball_yolo_ncnn",
+            "digit",
+        ),
         help="最终启动检测器",
     )
     return parser

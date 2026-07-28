@@ -15,12 +15,14 @@ from core.config_loader import (
     load_digit_config,
     load_shape_config,
     load_steel_ball_config,
+    load_steel_ball_ncnn_config,
 )
 from core.models import ColorClass, FramePacket
 from detectors.color_detector import ColorDetector
 from detectors.digit_detector import DigitDetector
 from detectors.shape_detector import ShapeDetector
 from detectors.steel_ball_detector import SteelBallDetector
+from detectors.steel_ball_yolo_ncnn_detector import SteelBallYoloNcnnDetector
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -30,13 +32,21 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, help="输入视频")
     parser.add_argument(
         "--detector",
-        choices=("color", "shape", "steel_ball", "digit"),
+        choices=(
+            "color",
+            "shape",
+            "steel_ball",
+            "steel_ball_classical",
+            "steel_ball_yolo_ncnn",
+            "digit",
+        ),
         default="color",
     )
     parser.add_argument("--target", default="red", help="colors.yaml 中的目标颜色")
     parser.add_argument("--config", default="config/colors.yaml", help="颜色配置路径")
     parser.add_argument("--shape-config", default="config/shapes.yaml", help="形状配置路径")
     parser.add_argument("--steel-ball-config", default="config/steel_ball.yaml")
+    parser.add_argument("--steel-ball-ncnn-config", default="config/steel_ball_ncnn.yaml")
     parser.add_argument("--digit-config", default="config/digit.yaml")
     parser.add_argument("--calibration-config", default="config/calibration.yaml")
     parser.add_argument("--display", action="store_true", help="显示调试画面")
@@ -65,10 +75,13 @@ def create_detector(args: argparse.Namespace):
             load_digit_config(args.digit_config),
             require_complete_templates=True,
         )
-    return SteelBallDetector(
-        load_steel_ball_config(args.steel_ball_config),
-        load_calibration_config(args.calibration_config),
-    )
+    if args.detector in {"steel_ball", "steel_ball_classical"}:
+        return SteelBallDetector(
+            load_steel_ball_config(args.steel_ball_config),
+            load_calibration_config(args.calibration_config),
+        )
+    ncnn_config = load_steel_ball_ncnn_config(args.steel_ball_ncnn_config)
+    return SteelBallYoloNcnnDetector(ncnn_config)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -155,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
                 if delay > 0:
                     time.sleep(delay)
     finally:
+        if "detector" in locals() and hasattr(detector, "close"):
+            detector.close()
         capture.release()
         if writer is not None:
             writer.release()

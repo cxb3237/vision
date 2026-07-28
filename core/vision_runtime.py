@@ -134,6 +134,18 @@ class VisionRuntime:
                 "runtime_modified": False,
                 "competition_mode": bool(initial_competition_mode),
                 "vision_output_enabled": bool(initial_competition_mode),
+                "steel_ball_backend": "",
+                "model_loaded": False,
+                "model_path": "",
+                "inference_ms": 0.0,
+                "preprocess_ms": 0.0,
+                "postprocess_ms": 0.0,
+                "total_ms": 0.0,
+                "estimated_fps": 0.0,
+                "detection_count": 0,
+                "selected_target_confidence": 0.0,
+                "ncnn_threads": 0,
+                "detector_error": "",
                 "last_error": "",
                 "camera_controls": {},
                 "ui": {
@@ -202,7 +214,7 @@ class VisionRuntime:
                     self.frame_stream.start()
                     self._preview_started = True
                 self._started = True
-                self.state_store.update(runtime_running=True)
+                self.state_store.update(runtime_running=True, **self._detector_status())
                 LOG.info("VisionRuntime已启动，detector=%s", self.current_detector_name)
             except Exception:
                 self._stop_resources_locked()
@@ -228,6 +240,8 @@ class VisionRuntime:
         if self._camera_started:
             self.camera_service.stop()
             self._camera_started = False
+        if hasattr(self.detector, "close"):
+            self.detector.close()
         self._started = False
         self.state_store.update(runtime_running=False, camera_online=False, serial_online=False)
         LOG.info("VisionRuntime已停止")
@@ -355,7 +369,12 @@ class VisionRuntime:
             raise RuntimeError("当前运行时未配置检测器工厂")
         old = self.detector
         new_detector = self.detector_factory(name)
-        new_detector.initialize()
+        try:
+            new_detector.initialize()
+        except Exception:
+            if hasattr(new_detector, "close"):
+                new_detector.close()
+            raise
         self.detector = new_detector
         self.current_detector_name = name
         self.detector_id = name
@@ -366,8 +385,49 @@ class VisionRuntime:
         self.control_processor.tracker.reset()
         if hasattr(old, "reset"):
             old.reset()
-        self.state_store.update(detector=name, last_error="")
+        if hasattr(old, "close"):
+            old.close()
+        self.state_store.update(detector=name, last_error="", **self._detector_status())
         LOG.info("检测器已切换: %s", name)
+
+    def _detector_status(self) -> dict[str, Any]:
+        provider = getattr(self.detector, "get_runtime_status", None)
+        if callable(provider):
+            try:
+                status = provider()
+            except Exception as exc:
+                return {"detector_error": f"detector status unavailable: {exc}"}
+            return dict(status) if isinstance(status, dict) else {}
+        if isinstance(self.detector, SteelBallDetector):
+            debug = self.detector.get_debug_data()
+            return {
+                "steel_ball_backend": "classical",
+                "model_loaded": False,
+                "model_path": "",
+                "inference_ms": 0.0,
+                "preprocess_ms": 0.0,
+                "postprocess_ms": 0.0,
+                "total_ms": 0.0,
+                "estimated_fps": 0.0,
+                "detection_count": int(getattr(debug, "candidate_count", 0)),
+                "selected_target_confidence": 0.0,
+                "ncnn_threads": 0,
+                "detector_error": "",
+            }
+        return {
+            "steel_ball_backend": "",
+            "model_loaded": False,
+            "model_path": "",
+            "inference_ms": 0.0,
+            "preprocess_ms": 0.0,
+            "postprocess_ms": 0.0,
+            "total_ms": 0.0,
+            "estimated_fps": 0.0,
+            "detection_count": 0,
+            "selected_target_confidence": 0.0,
+            "ncnn_threads": 0,
+            "detector_error": "",
+        }
 
     def _set_competition(self, enabled: bool) -> None:
         if enabled:
@@ -604,6 +664,7 @@ class VisionRuntime:
             vision_output_enabled=bool(
                 self.state_store.snapshot().get("competition_mode", False)
             ),
+            **self._detector_status(),
         )
 
     def _reapply_overrides_after_reconnect(self, camera_stats: dict[str, Any]) -> None:

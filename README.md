@@ -209,6 +209,33 @@ python -m tools.replay_test \
 当 `calibration.yaml` 已标定且焦距 `fx` 有效时，距离按
 `fx × known_diameter_mm / diameter_px` 估算；未标定或像素直径无效时协议值为 `0xFFFF`。
 
+正式树莓派运行还提供轻量 `YOLO-NCNN` 后端。它复用唯一的 `CameraService`、现有
+`TargetTracker` 和钢球协议编号，不依赖 Ultralytics 或 PyTorch：
+
+```bash
+python3 app.py \
+  --mode track \
+  --detector steel_ball_yolo_ncnn \
+  --steel-ball-ncnn-config config/steel_ball_ncnn.yaml \
+  --touch-ui \
+  --headless \
+  --no-serial
+
+python3 -m tools.replay_test \
+  --input data/recordings/steel_ball.mp4 \
+  --detector steel_ball_yolo_ncnn \
+  --steel-ball-ncnn-config config/steel_ball_ncnn.yaml \
+  --display
+```
+
+`config/steel_ball_ncnn.yaml`集中保存模型路径、416输入尺寸、置信度/NMS阈值、最大框数和
+1～4个NCNN线程，每次创建检测器时只读取一次。网页按钮“钢球 YOLO”选择该后端；需要快速
+回退时选择“钢球 CV”或使用`--detector steel_ball_classical`。传统兼容名称
+`--detector steel_ball`仍指向原传统CV实现，不会静默掩盖NCNN加载或推理故障。
+
+树莓派轻量部署依赖记录在`requirements-rpi-ncnn.txt`。其中`ncnn`必须使用适合当前Raspberry
+Pi OS/ARM64的构建；正式推理路径不会导入`torch`、`torchvision`或`ultralytics`。
+
 ### 交互式标定图片采集
 
 `tools.capture_calibration` 复用正式主程序的 `CameraService` 和 `camera.yaml`，因此分辨率、

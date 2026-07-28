@@ -214,3 +214,19 @@ class SteelBallConfig:
     hough_param2: float = 20.0
     hough_min_radius: int = 5
     hough_max_radius: int = 80
+
+
+@dataclass(slots=True)
+class SteelBallNcnnConfig:
+    """Lightweight NCNN steel-ball detector configuration."""
+
+    backend: str = "ncnn"
+    model_path: str = "models/steel_ball/best_ncnn_model"
+    imgsz: int = 416
+    conf_threshold: float = 0.40
+    iou_threshold: float = 0.60
+    max_det: int = 30
+    num_threads: int = 4
+    target_class: int = 100
+    fallback_to_classical: bool = False
+    debug_shapes: bool = False

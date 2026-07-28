@@ -170,7 +170,14 @@ def load_touch_ui_config(
     jpeg_quality = _integer_range(preview, "preview", "jpeg_quality", 1, 100)
     max_width = _integer_range(preview, "preview", "max_width", 160, 4096)
     detector = startup["detector"]
-    if detector not in {"color", "shape", "steel_ball", "digit"}:
+    if detector not in {
+        "color",
+        "shape",
+        "steel_ball",
+        "steel_ball_classical",
+        "steel_ball_yolo_ncnn",
+        "digit",
+    }:
         raise TouchUIConfigError("touch_ui.startup.detector 无效")
     for name in ("restore_runtime_overrides", "competition_mode"):
         if not isinstance(startup[name], bool):

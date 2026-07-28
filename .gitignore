@@ -43,3 +43,9 @@ data/calibration/visualized/*
 .env.*
 *.key
 config/calibration.yaml
+
+# Steel-ball dataset audit generated artifacts
+training/steel_ball_yolo/audit/previews/
+training/steel_ball_yolo/steel_ball_audit_bundle.zip
+training/steel_ball_yolo/.venv-audit/
+training/steel_ball_yolo/__pycache__/

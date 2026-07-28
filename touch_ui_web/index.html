@@ -49,6 +49,13 @@
           <div><dt>Center</dt><dd id="center">-1, -1</dd></div>
         </dl>
 
+        <dl id="steelBallStatus" class="telemetry-lines" hidden>
+          <div><dt>钢球识别</dt><dd id="steelBallBackend">—</dd></div>
+          <div><dt>模型</dt><dd id="steelBallModel">—</dd></div>
+          <div><dt>当前检测</dt><dd><span id="steelBallCount">0</span>个</dd></div>
+          <div><dt>推理</dt><dd id="steelBallTiming">0.0 ms</dd></div>
+        </dl>
+
         <div id="lastError" class="error-line">无错误</div>
 
         <section class="dock-section">
@@ -57,7 +64,8 @@
             <button data-detector="digit">数字</button>
             <button data-detector="color">颜色</button>
             <button data-detector="shape">形状</button>
-            <button data-detector="steel_ball">钢球</button>
+            <button data-detector="steel_ball_yolo_ncnn">钢球 YOLO</button>
+            <button data-detector="steel_ball_classical">钢球 CV</button>
           </div>
         </section>
 

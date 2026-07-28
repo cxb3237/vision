@@ -48,6 +48,18 @@ const CONTROL_GROUPS = [
   ["曝光", ["exposure_auto", "exposure_absolute", "gain", "backlight_compensation", "power_line_frequency"]],
   ["白平衡", ["white_balance_automatic", "white_balance_temperature"]],
 ];
+const DETECTOR_LABELS = {
+  color: "颜色识别",
+  shape: "形状识别",
+  digit: "数字识别",
+  steel_ball: "钢球识别（YOLO-NCNN）",
+  steel_ball_classical: "钢球识别（传统CV）",
+  steel_ball_yolo_ncnn: "钢球识别（YOLO-NCNN）",
+};
+
+function detectorLabel(name) {
+  return DETECTOR_LABELS[name] || "—";
+}
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -85,20 +97,39 @@ function renderStatus(status) {
   text("fps", Number(status.fps || 0).toFixed(1));
   text("txCount", status.vmc_tx_count || 0);
   text("targetClass", status.target_class || "—");
-  text("detector", status.detector || "—");
+  text("detector", detectorLabel(status.detector));
   text("confidence", status.confidence || 0);
   text("center", `${status.center_x ?? -1}, ${status.center_y ?? -1}`);
   text("mode", status.mode || "—");
-  text("lastError", status.last_error || "无错误");
-  text("overlayDetector", status.detector || "—");
+  text("lastError", status.detector_error || status.last_error || "无错误");
+  text("overlayDetector", detectorLabel(status.detector));
   text("overlayTarget", status.target_class || "—");
   text("overlayState", status.state || "NONE");
-  text("cDetector", status.detector || "—");
+  text("cDetector", detectorLabel(status.detector));
   text("cClass", status.target_class || "—");
   text("cState", status.state || "NONE");
   text("cConfidence", status.confidence || 0);
   text("cFps", Number(status.fps || 0).toFixed(1));
   text("cLinks", `${status.camera_online ? "ON" : "OFF"} / ${status.serial_online ? "ON" : "OFF"}`);
+  const steelBallPanel = $("steelBallStatus");
+  if (steelBallPanel) {
+    const isSteelBall = !!status.steel_ball_backend;
+    steelBallPanel.hidden = !isSteelBall;
+    if (isSteelBall) {
+      text(
+        "steelBallBackend",
+        status.steel_ball_backend === "ncnn" ? "YOLO-NCNN" : "传统CV",
+      );
+      text(
+        "steelBallModel",
+        status.model_loaded
+          ? "已加载"
+          : (status.steel_ball_backend === "ncnn" ? "加载失败" : "不适用"),
+      );
+      text("steelBallCount", Number(status.detection_count || 0));
+      text("steelBallTiming", `${Number(status.total_ms || 0).toFixed(1)} ms`);
+    }
+  }
   setTag("runningBadge", status.runtime_running ? "RUNNING" : "STOPPED", !!status.runtime_running);
   setTag("cameraBadge", status.camera_online ? "CAM ONLINE" : "CAM OFFLINE", !!status.camera_online);
   setTag("serialBadge", status.serial_online ? "UART ONLINE" : "UART OFFLINE", !!status.serial_online);
@@ -122,7 +153,14 @@ function renderStatus(status) {
   $("normalDock").hidden = !!status.competition_mode;
   $("competitionDock").hidden = !status.competition_mode;
   document.querySelectorAll("[data-detector]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.detector === status.detector);
+    const legacySteelBallSelected = status.detector === "steel_ball" && (
+      (status.steel_ball_backend === "ncnn" && button.dataset.detector === "steel_ball_yolo_ncnn")
+      || (status.steel_ball_backend === "classical" && button.dataset.detector === "steel_ball_classical")
+    );
+    button.classList.toggle(
+      "active",
+      button.dataset.detector === status.detector || legacySteelBallSelected,
+    );
   });
 }
 

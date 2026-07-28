@@ -24,7 +24,14 @@ ALLOWED_CONTROLS = {
     "backlight_compensation",
     "power_line_frequency",
 }
-ALLOWED_DETECTORS = {"color", "shape", "steel_ball", "digit"}
+ALLOWED_DETECTORS = {
+    "color",
+    "shape",
+    "steel_ball",
+    "steel_ball_classical",
+    "steel_ball_yolo_ncnn",
+    "digit",
+}
 
 
 class RuntimeAPI(Protocol):

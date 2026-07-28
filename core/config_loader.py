@@ -15,6 +15,7 @@ from core.models import (
     DigitConfig,
     ShapeConfig,
     SteelBallConfig,
+    SteelBallNcnnConfig,
 )
 
 
@@ -201,8 +202,18 @@ def load_mission_config(
         "calibration",
     }:
         raise ConfigError("default_mode 必须是当前已实现的 idle/search/track/calibration")
-    if data["detector"] not in {"color", "shape", "steel_ball", "digit"}:
-        raise ConfigError("detector 必须是 color、shape、steel_ball 或 digit")
+    if data["detector"] not in {
+        "color",
+        "shape",
+        "steel_ball",
+        "steel_ball_classical",
+        "steel_ball_yolo_ncnn",
+        "digit",
+    }:
+        raise ConfigError(
+            "detector 必须是 color、shape、steel_ball、steel_ball_classical、"
+            "steel_ball_yolo_ncnn 或 digit"
+        )
     for key in (
         "confirm_frames",
         "lost_frames",
@@ -536,4 +547,53 @@ def load_steel_ball_config(path: str | Path = "config/steel_ball.yaml") -> Steel
         raise ConfigError("钢球宽高比范围无效")
     if config.hough_min_radius < 0 or config.hough_max_radius < config.hough_min_radius:
         raise ConfigError("Hough 半径范围无效")
+    return config
+
+
+def load_steel_ball_ncnn_config(
+    path: str | Path = "config/steel_ball_ncnn.yaml",
+) -> SteelBallNcnnConfig:
+    """Load the NCNN backend once and validate every runtime-sensitive field."""
+
+    source = resolve_config_path(path)
+    data = _read(source)
+    try:
+        config = SteelBallNcnnConfig(**data)
+    except TypeError as exc:
+        raise ConfigError(f"steel_ball_ncnn contains an unknown or missing field: {exc}") from exc
+    if config.backend not in {"ncnn", "classical"}:
+        raise ConfigError("steel_ball_ncnn.backend must be ncnn or classical")
+    if not isinstance(config.model_path, str) or not config.model_path.strip():
+        raise ConfigError("steel_ball_ncnn.model_path must be a non-empty path")
+    model_path = Path(config.model_path).expanduser()
+    if not model_path.is_absolute():
+        model_path = PROJECT_ROOT / model_path
+    config.model_path = str(model_path.resolve())
+    if isinstance(config.imgsz, bool) or not isinstance(config.imgsz, int) or config.imgsz <= 0:
+        raise ConfigError("steel_ball_ncnn.imgsz must be a positive integer")
+    for name in ("conf_threshold", "iou_threshold"):
+        value = getattr(config, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise ConfigError(f"steel_ball_ncnn.{name} must be in 0..1")
+    if (
+        isinstance(config.max_det, bool)
+        or not isinstance(config.max_det, int)
+        or not 1 <= config.max_det <= 100
+    ):
+        raise ConfigError("steel_ball_ncnn.max_det must be in 1..100")
+    if (
+        isinstance(config.num_threads, bool)
+        or not isinstance(config.num_threads, int)
+        or not 1 <= config.num_threads <= 4
+    ):
+        raise ConfigError("steel_ball_ncnn.num_threads must be in 1..4")
+    if (
+        isinstance(config.target_class, bool)
+        or not isinstance(config.target_class, int)
+        or not 0 <= config.target_class <= 0xFFFF
+    ):
+        raise ConfigError("steel_ball_ncnn.target_class must be in 0..65535")
+    for name in ("fallback_to_classical", "debug_shapes"):
+        if not isinstance(getattr(config, name), bool):
+            raise ConfigError(f"steel_ball_ncnn.{name} must be boolean")
     return config

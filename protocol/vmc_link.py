@@ -117,6 +117,8 @@ def normalize_detector_id(detector: str | int | DetectorID) -> int:
             "color": DetectorID.COLOR,
             "shape": DetectorID.SHAPE,
             "steel_ball": DetectorID.STEEL_BALL,
+            "steel_ball_classical": DetectorID.STEEL_BALL,
+            "steel_ball_yolo_ncnn": DetectorID.STEEL_BALL,
             "digit": DetectorID.DIGIT,
         }
         return int(names.get(normalized, DetectorID.NONE))
