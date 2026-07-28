@@ -1,0 +1,5 @@
+# Install the platform-specific ncnn Python binding separately on Raspberry Pi OS.
+numpy
+opencv-python
+PyYAML
+ncnn
