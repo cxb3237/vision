@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 from pathlib import Path
+import socket
 import threading
 import time
 from typing import Any
@@ -14,14 +15,28 @@ from urllib.parse import urlsplit
 
 from touch_ui.api import TouchAPI, api_error
 from touch_ui.kiosk import KioskExitError, exit_kiosk
-from touch_ui.models import CommandType, TouchUIConfig
+from touch_ui.models import CommandType, TouchUIConfig, validate_loopback_host
 
 
 LOG = logging.getLogger(__name__)
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+
+
+class InvalidContentLength(ValueError):
+    pass
+
+
+class RequestEntityTooLarge(ValueError):
+    pass
+
+
+class IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
 
 
 class TouchUIServer:
     def __init__(self, runtime: Any, config: TouchUIConfig, web_root: Path | None = None) -> None:
+        validate_loopback_host(config.host)
         self.runtime = runtime
         self.config = config
         self.api = TouchAPI(runtime)
@@ -54,7 +69,8 @@ class TouchUIServer:
         if self._thread is not None and self._thread.is_alive():
             return
         handler = self._build_handler()
-        self._server = ThreadingHTTPServer((self.config.host, self.config.port), handler)
+        server_type = IPv6ThreadingHTTPServer if self.config.host == "::1" else ThreadingHTTPServer
+        self._server = server_type((self.config.host, self.config.port), handler)
         self._server.daemon_threads = True
         self._thread = threading.Thread(
             target=self._serve,
@@ -102,10 +118,25 @@ class TouchUIServer:
                 self.wfile.write(data)
 
             def _body(self) -> Any:
-                length = int(self.headers.get("Content-Length", "0"))
-                if length > 65536:
-                    raise ValueError("请求体过大")
-                raw = self.rfile.read(length)
+                raw_length = self.headers.get("Content-Length", "0")
+                try:
+                    length = int(raw_length, 10)
+                except (TypeError, ValueError) as exc:
+                    raise InvalidContentLength("Content-Length 非法") from exc
+                if length < 0:
+                    raise InvalidContentLength("Content-Length 不能为负数")
+                if length > MAX_REQUEST_BODY_BYTES:
+                    raise RequestEntityTooLarge("请求体超过 64 KiB")
+                previous_timeout = self.connection.gettimeout()
+                self.connection.settimeout(2.0)
+                try:
+                    raw = self.rfile.read(length)
+                except (TimeoutError, OSError) as exc:
+                    raise InvalidContentLength("请求体读取超时或不完整") from exc
+                finally:
+                    self.connection.settimeout(previous_timeout)
+                if len(raw) != length:
+                    raise InvalidContentLength("请求体长度与 Content-Length 不一致")
                 return json.loads(raw.decode("utf-8")) if raw else {}
 
             def _static(self, name: str, content_type: str) -> None:
@@ -131,8 +162,6 @@ class TouchUIServer:
                         self._json(*owner.api.status())
                     elif path == "/api/config/camera":
                         self._json(*owner.api.camera_config())
-                    elif path == "/api/detector":
-                        self._json(*owner.api.detector())
                     elif path == "/api/preview.mjpg":
                         self._mjpeg()
                     elif path in {"/", "/index.html"}:
@@ -180,6 +209,8 @@ class TouchUIServer:
                         self._json(*owner.api.patch_camera(self._body()))
                     else:
                         self._json(*api_error(404, "NOT_FOUND", "接口不存在"))
+                except RequestEntityTooLarge as exc:
+                    self._json(*api_error(413, "PAYLOAD_TOO_LARGE", str(exc)))
                 except (ValueError, json.JSONDecodeError) as exc:
                     self._json(*api_error(400, "INVALID_JSON", str(exc)))
 
@@ -193,9 +224,7 @@ class TouchUIServer:
                     "/api/competition/exit": CommandType.EXIT_COMPETITION,
                 }
                 try:
-                    if path == "/api/detector/select":
-                        self._json(*owner.api.select_detector(self._body()))
-                    elif path == "/api/kiosk/exit":
+                    if path == "/api/kiosk/exit":
                         body = self._body()
                         if body:
                             self._json(*api_error(400, "INVALID_BODY", "退出kiosk不接受PID或命令参数"))
@@ -229,6 +258,8 @@ class TouchUIServer:
                         self._json(*owner.api.command(routes[path]))
                     else:
                         self._json(*api_error(404, "NOT_FOUND", "接口不存在"))
+                except RequestEntityTooLarge as exc:
+                    self._json(*api_error(413, "PAYLOAD_TOO_LARGE", str(exc)))
                 except (ValueError, json.JSONDecodeError) as exc:
                     self._json(*api_error(400, "INVALID_JSON", str(exc)))
 

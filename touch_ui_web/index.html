@@ -32,7 +32,7 @@
           <span id="cameraBadge" class="status-tag offline">CAM OFFLINE</span>
           <span id="serialBadge" class="status-tag offline">UART OFFLINE</span>
           <span id="mcuBadge" class="status-tag warning">MCU WAIT</span>
-          <span id="vmcBadge" class="status-tag warning">位置 TX IDLE</span>
+          <span id="positionTxBadge" class="status-tag warning">位置 TX OFFLINE</span>
           <span id="dirtyBadge" class="status-tag">CLEAN</span>
           <span id="competitionBadge" class="status-tag">DEBUG</span>
         </div>
@@ -47,6 +47,9 @@
           <div><dt>位置包发送</dt><dd id="txCount">0</dd></div>
           <div><dt>位置标定</dt><dd id="mappingState">未标定</dd></div>
           <div><dt>UART状态</dt><dd id="uartState">串口未打开</dd></div>
+          <div><dt>UART 端口</dt><dd id="uartPortState">未打开</dd></div>
+          <div><dt>MCU 状态</dt><dd id="mcuStatus">{}</dd></div>
+          <div><dt>最近发送位置</dt><dd id="lastSentPosition">--</dd></div>
           <div><dt>摄像头 / 识别 / 预览</dt><dd id="pipelineFps">0 / 0 / 0 FPS</dd></div>
           <div><dt>端到端 当前 / P95</dt><dd id="pipelineLatency">0 / 0 ms</dd></div>
           <div><dt>跳帧 / 预览覆盖</dt><dd id="pipelineDrops">0 / 0</dd></div>

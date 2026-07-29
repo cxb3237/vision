@@ -24,16 +24,6 @@ ALLOWED_CONTROLS = {
     "backlight_compensation",
     "power_line_frequency",
 }
-ALLOWED_DETECTORS = {
-    "color",
-    "shape",
-    "steel_ball",
-    "steel_ball_classical",
-    "steel_ball_yolo_ncnn",
-    "digit",
-}
-
-
 class RuntimeAPI(Protocol):
     def submit_command(self, command_type: CommandType | str, payload: dict[str, Any] | None = None) -> str: ...
     def get_status_snapshot(self) -> dict[str, Any]: ...
@@ -113,23 +103,6 @@ class TouchAPI:
                 return api_error(409, "AUTO_CONTROL_ACTIVE", "自动曝光开启时不能设置曝光值")
         return self._submit(
             CommandType.SET_CAMERA_CONTROL, {"name": name, "value": value}
-        )
-
-    def detector(self) -> tuple[int, dict[str, Any]]:
-        status = self.runtime.get_status_snapshot()
-        return 200, {
-            "ok": True,
-            "detector": status.get("detector"),
-            "available": sorted(ALLOWED_DETECTORS),
-        }
-
-    def select_detector(self, body: Any) -> tuple[int, dict[str, Any]]:
-        if not isinstance(body, dict) or body.get("detector") not in ALLOWED_DETECTORS:
-            return api_error(400, "INVALID_DETECTOR", "detector必须是color/shape/steel_ball/digit")
-        if self.runtime.get_status_snapshot().get("competition_mode"):
-            return api_error(409, "COMPETITION_MODE", "比赛模式禁止切换检测器")
-        return self._submit(
-            CommandType.SELECT_DETECTOR, {"detector": body["detector"]}
         )
 
     def command(self, command_type: CommandType) -> tuple[int, dict[str, Any]]:

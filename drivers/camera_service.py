@@ -376,6 +376,7 @@ class CameraService:
                 else 0.0
             )
             return {
+                "running": self.is_running(),
                 "frames_ok": self._frames_ok,
                 "frames_failed": self._frames_failed,
                 "actual_fps": actual_fps,

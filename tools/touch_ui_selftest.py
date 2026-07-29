@@ -26,7 +26,7 @@ class _Runtime:
                 "runtime_running": True,
                 "competition_mode": False,
                 "vision_output_enabled": False,
-                "detector": "digit",
+                "detector": "steel_ball_yolo_ncnn",
             }
         )
         self.commands = []
@@ -63,7 +63,7 @@ def run_selftest() -> None:
         runtime = _Runtime()
         api = TouchAPI(runtime)
         assert api.health()[1]["ok"]
-        assert api.status()[1]["status"]["detector"] == "digit"
+        assert api.status()[1]["status"]["detector"] == "steel_ball_yolo_ncnn"
         response = api.patch_camera({"controls": {"brightness": 25}})
         assert response[0] == 202
         assert runtime.commands[-1][0] == CommandType.SET_CAMERA_CONTROL
@@ -71,7 +71,7 @@ def run_selftest() -> None:
         persistence = RuntimeConfigStore(config)
         persistence.save_camera_override({"brightness": 25})
         assert persistence.load_camera_override() == {"brightness": 25}
-        persistence.save_ui_state(True, "digit")
+        persistence.save_ui_state(True)
         assert persistence.load_ui_state()["competition_mode"] is False
         assert persistence.restore_baseline()
 

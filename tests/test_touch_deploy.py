@@ -28,7 +28,7 @@ def test_kiosk_is_local_only_and_waits_for_health() -> None:
     text = (ROOT / "deploy/start_kiosk.sh").read_text(encoding="utf-8")
     assert "http://127.0.0.1:8765" in text
     assert 'VISION_TOUCH_URL="${VISION_TOUCH_URL:-' in text
-    assert "localhost" in text and "eval" not in text
+    assert "localhost" in text and "::1" in text and "eval" not in text
     assert "/healthz" in text and "--kiosk" in text
     assert "chromium-browser" in text and "https://" not in text
     assert "google-chrome" in text and "google-chrome-stable" in text
@@ -48,6 +48,14 @@ def test_installer_passes_validated_touch_url_as_environment_variable() -> None:
         encoding="utf-8"
     )
     assert "load_touch_ui_config" in install
-    assert "tools.check_digit_templates" in install
+    assert "tools.check_digit_templates" not in install
     assert "@TOUCH_URL@" in desktop and "VISION_TOUCH_URL=" in desktop
     assert "eval" not in install
+
+
+def test_raspberry_pi_dependencies_include_serial_and_are_checked() -> None:
+    requirements = (ROOT / "requirements-rpi-ncnn.txt").read_text(encoding="utf-8")
+    install = (ROOT / "deploy/install_touch_ui.sh").read_text(encoding="utf-8")
+    assert any(line.strip() == "pyserial" for line in requirements.splitlines())
+    for module in ("serial", "cv2", "yaml"):
+        assert f"import {module}" in install or "import ${module}" in install

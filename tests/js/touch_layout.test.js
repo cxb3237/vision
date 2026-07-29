@@ -52,7 +52,7 @@ function createServer({patchFailure = false, applyDelayMs = 0, controlOverrides 
           delete command.appliedAt;
         }
       });
-      json(response, {ok: true, status: {runtime_running: true, camera_online: true, serial_online: true, vmc_tx_count: 3, detector: "digit", state: "LOCKED", fps: 30, competition_mode: state.competitionMode, vision_output_enabled: state.visionOutputEnabled, commands: state.commands, ui: {parameter_debounce_ms: 20}}});
+      json(response, {ok: true, status: {runtime_running: true, camera_online: true, mcu_ready: true, serial_online: true, position_tx_count: 3, detector: "steel_ball_yolo_ncnn", state: "LOCKED", fps: 30, competition_mode: state.competitionMode, vision_output_enabled: state.visionOutputEnabled, commands: state.commands, ui: {parameter_debounce_ms: 20}}});
       return;
     }
     if (pathname === "/api/config/camera") {

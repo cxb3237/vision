@@ -8,7 +8,6 @@ preview:
   max_width: 960
 
 startup:
-  detector: steel_ball_yolo_ncnn
   restore_runtime_overrides: true
   competition_mode: false
 

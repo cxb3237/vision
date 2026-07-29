@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import http.client
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ from touch_ui.models import (
     load_touch_ui_config,
 )
 from touch_ui.runtime_config import RuntimeConfigStore
+from touch_ui.server import TouchUIServer
 from touch_ui.state_store import StateStore
 
 
@@ -40,7 +42,7 @@ class FakeRuntime:
             "runtime_running": True,
             "competition_mode": False,
             "vision_output_enabled": False,
-            "detector": "digit",
+            "detector": "steel_ball_yolo_ncnn",
         }
         self.config = {
             "controls": {
@@ -107,6 +109,47 @@ def test_touch_config_rejects_absolute_runtime_path(tmp_path) -> None:
         load_touch_ui_config(path, project_root=tmp_path)
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.20", "8.8.8.8"])
+def test_touch_config_rejects_non_loopback_host(tmp_path, host) -> None:
+    data = yaml.safe_load(PROJECT_CONFIG.read_text(encoding="utf-8"))
+    data["server"]["host"] = host
+    path = tmp_path / "bad-host.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(TouchUIConfigError, match="回环"):
+        load_touch_ui_config(path, project_root=tmp_path)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_touch_config_accepts_only_supported_loopback_hosts(tmp_path, host) -> None:
+    data = yaml.safe_load(PROJECT_CONFIG.read_text(encoding="utf-8"))
+    data["server"]["host"] = host
+    path = tmp_path / "loopback.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    assert load_touch_ui_config(path, project_root=tmp_path).host == host
+
+
+@pytest.mark.parametrize(("content_length", "expected_status"), [("-1", 400), ("65537", 413)])
+def test_http_rejects_invalid_or_oversized_content_length(
+    tmp_path, content_length, expected_status
+) -> None:
+    config = replace(touch_config(tmp_path), host="127.0.0.1", port=0)
+    server = TouchUIServer(FakeRuntime(), config)
+    server.start()
+    try:
+        assert server._server is not None
+        port = int(server._server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.putrequest("POST", "/api/competition/enter")
+        connection.putheader("Content-Length", content_length)
+        connection.endheaders()
+        response = connection.getresponse()
+        assert response.status == expected_status
+        response.read()
+        connection.close()
+    finally:
+        server.stop()
+
+
 def test_state_snapshot_is_thread_safe_and_serializable() -> None:
     store = StateStore({"count": 0, "nested": {"value": 0}})
 
@@ -161,7 +204,7 @@ def test_competition_mode_blocks_modifications_but_exit_is_queued() -> None:
     runtime.state["competition_mode"] = True
     api = TouchAPI(runtime)
     assert api.patch_camera({"controls": {"brightness": 30}})[1]["error_code"] == "COMPETITION_MODE"
-    assert api.select_detector({"detector": "color"})[1]["error_code"] == "COMPETITION_MODE"
+    assert not hasattr(api, "select_detector")
     assert api.command(CommandType.EXIT_COMPETITION)[0] == 202
 
 
@@ -314,10 +357,10 @@ def test_runtime_save_is_atomic_and_creates_backup(tmp_path) -> None:
 
 def test_ui_state_never_persists_competition_output_as_enabled(tmp_path) -> None:
     store = RuntimeConfigStore(touch_config(tmp_path))
-    store.save_ui_state(True, "digit")
+    store.save_ui_state(True)
     state = store.load_ui_state()
     assert state["competition_mode"] is False
-    assert state["detector"] == "digit"
+    assert "detector" not in state
 
 
 def test_atomic_save_failure_preserves_previous_file(tmp_path, monkeypatch) -> None:

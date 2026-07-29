@@ -23,6 +23,7 @@ from inference.steel_ball_ncnn_runtime import (
 from tools.steel_ball_ncnn_offline import (
     annotate_image,
     make_benchmark,
+    run_offline_inference,
     validate_source_argument,
 )
 
@@ -268,6 +269,48 @@ def test_benchmark_contains_median_p95_and_fps() -> None:
     json.dumps(benchmark)
 
 
+def test_offline_tool_reuses_formal_detector(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "input.jpg"
+    output_path = tmp_path / "annotated.jpg"
+    assert cv2.imwrite(str(image_path), np.zeros((80, 100, 3), dtype=np.uint8))
+
+    class FakeDetector:
+        model_loaded = True
+        detector_error = ""
+
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def initialize(self) -> None:
+            pass
+
+        def process(self, frame):
+            return SimpleNamespace(found=True, center_x=40, center_y=30, confidence=875)
+
+        def draw_debug(self, image, _result):
+            return image.copy()
+
+        def get_runtime_status(self):
+            return {"inference_ms": 12.5}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "tools.steel_ball_ncnn_offline.load_steel_ball_ncnn_config",
+        lambda _path: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "tools.steel_ball_ncnn_offline.SteelBallYoloNcnnDetector", FakeDetector
+    )
+    report = run_offline_inference(image_path, "unused.yaml", output_path)
+    assert report["found"] is True
+    assert (report["center_x"], report["center_y"]) == (40, 30)
+    assert report["confidence"] == pytest.approx(0.875)
+    assert report["inference_ms"] == 12.5
+    assert output_path.is_file()
+
+
 def test_load_is_idempotent_and_disables_vulkan(tmp_path: Path, monkeypatch) -> None:
     model_dir = tmp_path / "model"
     _write_fake_model_dir(model_dir)
@@ -297,4 +340,3 @@ def test_load_is_idempotent_and_disables_vulkan(tmp_path: Path, monkeypatch) -> 
     assert calls == {"param": 1, "model": 1}
     assert runtime._net.opt.use_vulkan_compute is False
     assert runtime._net.opt.num_threads == 3
-

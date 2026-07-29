@@ -16,14 +16,19 @@ mkdir -p "$RUNTIME_DIR"
 rm -f -- "$EXIT_REQUESTED"
 
 url_address="${VISION_TOUCH_URL#http://}"
-url_host="${url_address%%:*}"
-url_port="${url_address##*:}"
-if [[ "$VISION_TOUCH_URL" != http://* ]] \
-  || [[ "$url_address" == "$url_host" ]] \
-  || [[ "$url_host" != "127.0.0.1" && "$url_host" != "localhost" ]] \
+url_host=""
+url_port=""
+if [[ "$VISION_TOUCH_URL" == http://* && "$url_address" =~ ^(127\.0\.0\.1|localhost):([0-9]+)$ ]]; then
+  url_host="${BASH_REMATCH[1]}"
+  url_port="${BASH_REMATCH[2]}"
+elif [[ "$VISION_TOUCH_URL" == http://* && "$url_address" =~ ^\[::1\]:([0-9]+)$ ]]; then
+  url_host="::1"
+  url_port="${BASH_REMATCH[1]}"
+fi
+if [[ -z "$url_host" ]] \
   || [[ ! "$url_port" =~ ^[0-9]+$ ]] \
   || ((10#$url_port < 1 || 10#$url_port > 65535)); then
-  echo "VISION_TOUCH_URL仅允许http://127.0.0.1:PORT或http://localhost:PORT" >&2
+  echo "VISION_TOUCH_URL仅允许本机回环HTTP地址和有效端口" >&2
   exit 3
 fi
 

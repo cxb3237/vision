@@ -106,15 +106,7 @@ class SteelBallYoloNcnnDetector(BaseDetector):
         runtime_factory: Callable[..., Any] = SteelBallNcnnRuntime,
     ) -> None:
         if config.backend != "ncnn":
-            raise ValueError(
-                "SteelBallYoloNcnnDetector requires backend=ncnn; "
-                "choose steel_ball_classical for the classical backend"
-            )
-        if config.fallback_to_classical:
-            raise ValueError(
-                "fallback_to_classical is not implemented implicitly; select "
-                "steel_ball_classical explicitly so NCNN failures remain visible"
-            )
+            raise ValueError("SteelBallYoloNcnnDetector requires backend=ncnn")
         self.config = config
         self.target_class = int(config.target_class)
         self.runtime = runtime_factory(
@@ -248,7 +240,7 @@ class SteelBallYoloNcnnDetector(BaseDetector):
             self._detections = detections
             self._selected = selected
             self.detector_error = ""
-            if self.config.debug_shapes and not self._shape_logged:
+            if self.config.debug_tensor_shapes and not self._shape_logged:
                 LOG.info(
                     "Steel-ball NCNN shapes input=%s outputs=%s",
                     prediction.get("input_tensor_shape"),

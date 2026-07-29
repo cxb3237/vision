@@ -4,7 +4,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   ControlUpdateScheduler,
-  VmcTxTracker,
   automaticModeEnabled,
   classifyPointerGesture,
   controlDisplayName,
@@ -135,18 +134,6 @@ test("已完成等待同步阶段可区分", async () => {
   syncGate.resolve();
   await scheduler.waitForIdle();
   assert.equal(scheduler.phase("gain"), "IDLE");
-});
-
-test("VMC发送状态按在线和最近增长时间判断", () => {
-  const tracker = new VmcTxTracker(1500);
-  assert.equal(tracker.update(false, 10, 1000), "OFFLINE");
-  assert.equal(tracker.update(true, 10, 1100), "IDLE");
-  assert.equal(tracker.update(true, 11, 1200), "ACTIVE");
-  assert.equal(tracker.update(true, 11, 2699), "ACTIVE");
-  assert.equal(tracker.update(true, 11, 2701), "IDLE");
-  assert.equal(tracker.update(true, 2, 2800), "IDLE");
-  assert.equal(tracker.update(true, 3, 2900), "ACTIVE");
-  assert.equal(tracker.update(false, 3, 3000), "OFFLINE");
 });
 
 test("触摸手势达到阈值后才锁定方向", () => {

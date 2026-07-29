@@ -6,9 +6,4 @@ iou_threshold: 0.60
 max_det: 30
 num_threads: 4
 target_class: 100
-fallback_to_classical: false
-debug_shapes: false
-position_mapping:
-  calibrated: false
-  x_minus_125_px: 0
-  x_plus_125_px: 639
+debug_tensor_shapes: false

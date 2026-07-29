@@ -17,7 +17,6 @@ let confirmResolver = null;
 let cameraControlsRenderCount = 0;
 let competitionModeEnabled = false;
 const controlFailures = new Map();
-const vmcTxTracker = new VmcTxTracker(1500);
 const controlScheduler = new ControlUpdateScheduler({
   debounceMs: parameterDebounce,
   apply: applySingleControl,
@@ -97,9 +96,12 @@ function renderStatus(status) {
     "pipelineDrops",
     `${Number(status.vision_skipped_camera_frames || 0)} / ${Number(status.preview_overwritten_count || 0)}`,
   );
-  const positionTxCount = Number(status.position_tx_count ?? status.vmc_tx_count ?? 0);
-  text("txCount", positionTxCount);
+  const positionTxCount = Number(status.position_tx_count ?? 0);
+  const positionTxHz = Number(status.position_tx_hz ?? 0);
+  const invalidTxHz = Number(status.invalid_tx_hz ?? 0);
+  text("txCount", `${positionTxCount} · POS ${positionTxHz.toFixed(1)} Hz · INVALID ${invalidTxHz.toFixed(1)} Hz`);
   const calibrated = !!status.ball_position_calibrated;
+  const calibrationError = status.ball_position_calibration_error || "";
   const xMillimetres = status.ball_x_mm;
   const xPixels = status.ball_x_px;
   text(
@@ -111,8 +113,11 @@ function renderStatus(status) {
         : `${Number(xMillimetres) > 0 ? "+" : ""}${Number(xMillimetres)} mm`),
   );
   text("ballPixelPosition", `像素 X：${xPixels === null || xPixels === undefined ? "—" : xPixels}`);
-  text("mappingState", calibrated ? "已标定" : "未标定");
+  text("mappingState", calibrated ? "已标定" : (calibrationError || "未标定"));
   text("uartState", status.uart_state || "串口未打开");
+  text("uartPortState", status.uart_port_open ? "已打开" : "未打开");
+  text("mcuStatus", JSON.stringify(status.mcu_status || {}));
+  text("lastSentPosition", status.last_sent_position_mm === null || status.last_sent_position_mm === undefined ? "--" : `${status.last_sent_position_mm} mm`);
   text("lastError", status.last_uart_error || status.detector_error || status.last_error || "无错误");
   const steelBallPanel = $("steelBallStatus");
   if (steelBallPanel) {
@@ -129,12 +134,12 @@ function renderStatus(status) {
   setTag("cameraBadge", status.camera_online ? "CAM ONLINE" : "CAM OFFLINE", !!status.camera_online);
   setTag("serialBadge", status.serial_online ? "UART ONLINE" : "UART OFFLINE", !!status.serial_online);
   setTag("mcuBadge", status.mcu_ready ? "MCU READY" : "MCU WAIT", !!status.mcu_ready, !status.mcu_ready);
-  const vmcState = vmcTxTracker.update(!!status.serial_online, positionTxCount, Date.now());
+  const txState = !status.serial_online ? "OFFLINE" : (!status.mcu_ready ? "WAIT READY" : (status.vision_output_enabled ? "ACTIVE" : "PAUSED"));
   setTag(
-    "vmcBadge",
-    `位置 TX ${vmcState}`,
-    vmcState === "ACTIVE",
-    vmcState === "IDLE",
+    "positionTxBadge",
+    `位置 TX ${txState}`,
+    txState === "ACTIVE",
+    txState !== "ACTIVE" && txState !== "PAUSED",
   );
   const dirty = !!status.runtime_modified || controlScheduler.hasPending();
   setTag("dirtyBadge", dirty ? "DIRTY" : "CLEAN", !dirty, dirty);
@@ -738,7 +743,6 @@ window.__visionTouchTest = {
   finishDrawerDrag,
   replaceCameraControlState,
   controlScheduler,
-  vmcTxTracker,
   waitForCommand,
   getCameraControlsRenderCount: () => cameraControlsRenderCount,
 };

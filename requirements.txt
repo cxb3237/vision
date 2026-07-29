@@ -2,4 +2,5 @@ numpy
 opencv-python
 PyYAML
 pyserial
+ncnn
 pytest

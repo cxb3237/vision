@@ -45,12 +45,18 @@ if [[ ! -x "$PROJECT_DIR/.venv/bin/python" ]]; then
   exit 7
 fi
 
+for module in serial cv2 yaml; do
+  if ! "$PROJECT_DIR/.venv/bin/python" -c "import ${module}"; then
+    echo "树莓派运行依赖缺失: Python模块 ${module}；请先安装 requirements-rpi-ncnn.txt" >&2
+    exit 9
+  fi
+done
+
 touch_settings="$({
   cd "$PROJECT_DIR"
   "$PROJECT_DIR/.venv/bin/python" - "$PROJECT_DIR" <<'PY'
 from pathlib import Path
 import sys
-import yaml
 
 from touch_ui.models import load_touch_ui_config
 
@@ -60,44 +66,24 @@ config = load_touch_ui_config(
     project_root=project,
     create_runtime=False,
 )
-if config.host not in {"localhost", "127.0.0.1"}:
-    raise SystemExit("kiosk配置只允许server.host为localhost或127.0.0.1")
-detector = config.startup_detector
-if config.restore_runtime_overrides:
-    try:
-        state = yaml.safe_load(config.ui_state_file.read_text(encoding="utf-8"))
-        if state is None:
-            state = {}
-        if not isinstance(state, dict):
-            raise ValueError("触摸UI运行状态必须为映射")
-    except FileNotFoundError:
-        state = {}
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        print(f"忽略无效触摸UI运行状态: {exc}", file=sys.stderr)
-    else:
-        restored = state.get("detector")
-        if restored in {"color", "shape", "steel_ball", "digit"}:
-            detector = restored
+if config.host not in {"localhost", "127.0.0.1", "::1"}:
+    raise SystemExit("kiosk配置只允许回环地址")
 print(config.host)
 print(config.port)
-print(detector)
 PY
 })" || exit $?
 mapfile -t touch_values <<< "$touch_settings"
-if [[ "${#touch_values[@]}" -ne 3 ]]; then
-  echo "无法解析config/touch_ui.yaml中的host、port和启动检测器" >&2
+if [[ "${#touch_values[@]}" -ne 2 ]]; then
+  echo "无法解析config/touch_ui.yaml中的host和port" >&2
   exit 8
 fi
 touch_host="${touch_values[0]}"
 touch_port="${touch_values[1]}"
-startup_detector="${touch_values[2]}"
-touch_url="http://${touch_host}:${touch_port}"
-
-(
-  cd "$PROJECT_DIR"
-  "$PROJECT_DIR/.venv/bin/python" -m tools.check_digit_templates \
-    --detector "$startup_detector"
-)
+if [[ "$touch_host" == "::1" ]]; then
+  touch_url="http://[::1]:${touch_port}"
+else
+  touch_url="http://${touch_host}:${touch_port}"
+fi
 
 if [[ ! -e /dev/ttyAMA0 ]]; then
   echo "提示：当前未发现/dev/ttyAMA0；服务仍会安装并由串口重连机制等待设备。" >&2

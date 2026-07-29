@@ -4,6 +4,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_web_is_steel_ball_only_and_never_uses_browser_serial() -> None:
+    html = (ROOT / "touch_ui_web/index.html").read_text(encoding="utf-8")
+    javascript = (ROOT / "touch_ui_web/app.js").read_text(encoding="utf-8")
+    server = (ROOT / "touch_ui/server.py").read_text(encoding="utf-8")
+    combined = html + javascript
+    assert "steelBallStatus" in html
+    assert "ballPixelPosition" in html
+    assert "mcuStatus" in html and "lastSentPosition" in html
+    assert "navigator.serial" not in combined
+    assert "/api/detector" not in server
 HTML = (ROOT / "touch_ui_web/index.html").read_text(encoding="utf-8")
 CSS = (ROOT / "touch_ui_web/style.css").read_text(encoding="utf-8")
 JS = (ROOT / "touch_ui_web/app.js").read_text(encoding="utf-8")
@@ -120,6 +132,12 @@ def test_performance_panel_prefers_vision_fps_with_legacy_fallback() -> None:
     assert 'id="pipelineFps"' in HTML
     assert 'id="pipelineLatency"' in HTML
     assert 'id="pipelineDrops"' in HTML
+
+
+def test_frontend_displays_calibration_error_and_real_uart_rates() -> None:
+    assert "ball_position_calibration_error" in JS
+    assert "position_tx_hz" in JS
+    assert "invalid_tx_hz" in JS
 
 
 def test_performance_panel_keeps_ncnn_and_end_to_end_latency_distinct() -> None:

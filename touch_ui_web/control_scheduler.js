@@ -278,39 +278,9 @@
     }
   }
 
-  class VmcTxTracker {
-    constructor(activeWindowMs = 1500) {
-      this.activeWindowMs = activeWindowMs;
-      this.lastCount = null;
-      this.lastIncreaseAt = null;
-    }
-
-    update(serialOnline, rawCount, now = Date.now()) {
-      const count = Number(rawCount || 0);
-      if (!serialOnline) {
-        this.lastCount = count;
-        this.lastIncreaseAt = null;
-        return "OFFLINE";
-      }
-      if (this.lastCount === null || count < this.lastCount) {
-        this.lastCount = count;
-        this.lastIncreaseAt = null;
-        return "IDLE";
-      }
-      if (count > this.lastCount) {
-        this.lastIncreaseAt = now;
-      }
-      this.lastCount = count;
-      return this.lastIncreaseAt !== null && now - this.lastIncreaseAt <= this.activeWindowMs
-        ? "ACTIVE"
-        : "IDLE";
-    }
-  }
-
   return {
     CONTROL_LABELS,
     ControlUpdateScheduler,
-    VmcTxTracker,
     automaticModeEnabled,
     classifyPointerGesture,
     controlDisplayName,
