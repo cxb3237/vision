@@ -38,7 +38,7 @@ from detectors.steel_ball_detector import SteelBallDetector
 from detectors.steel_ball_yolo_ncnn_detector import SteelBallYoloNcnnDetector
 from detectors.target_tracker import TargetTracker
 from drivers.camera_service import CameraService
-from drivers.serial_service import SerialService
+from drivers.ball_uart_client import BallUartClient
 from protocol.vmc_messages import (
     Ack,
     AckResult,
@@ -230,32 +230,67 @@ def configure_touch_logging(log_path: str | Path = "logs/touch_ui.log") -> None:
     root.addHandler(handler)
 
 
-def resolve_serial_settings(
+def resolve_ball_uart_settings(
     args: argparse.Namespace,
     mission: dict[str, Any],
 ) -> dict[str, Any]:
     """合并串口配置；命令行优先，视频回放必须显式启用串口。"""
 
+    ball_uart = mission.get("ball_uart", {})
     explicit = bool(getattr(args, "serial", False)) or bool(
         getattr(args, "serial_port", None)
     )
     enabled = explicit or (
-        bool(mission["serial_enabled"]) and not bool(getattr(args, "video", None))
+        bool(ball_uart.get("enabled", mission["serial_enabled"]))
+        and not bool(getattr(args, "video", None))
     )
     if bool(getattr(args, "no_serial", False)):
         enabled = False
     requested_baudrate = getattr(args, "baudrate", None)
     requested_send_rate = getattr(args, "serial_rate", None)
     baudrate = (
-        mission["serial_baudrate"]
+        ball_uart.get("baudrate", mission["serial_baudrate"])
         if requested_baudrate is None
         else requested_baudrate
     )
     send_rate = (
-        mission["serial_send_rate_hz"]
+        ball_uart.get("send_rate_hz", mission["serial_send_rate_hz"])
         if requested_send_rate is None
         else requested_send_rate
     )
+    if baudrate <= 0:
+        raise ConfigError("baudrate 必须为正整数")
+    if send_rate <= 0:
+        raise ConfigError("serial-rate 必须为正数")
+    return {
+        "enabled": enabled,
+        "port": getattr(args, "serial_port", None) or ball_uart.get("port", mission["serial_port"]),
+        "baudrate": int(baudrate),
+        "send_rate_hz": float(send_rate),
+        "timeout_s": float(ball_uart.get("timeout_s", 0.02)),
+        "write_timeout_s": float(ball_uart.get("write_timeout_s", 0.05)),
+        "reconnect_interval_s": float(ball_uart.get("reconnect_interval_s", 1.0)),
+        "ping_interval_s": float(ball_uart.get("ping_interval_s", 1.0)),
+        "status_interval_s": float(ball_uart.get("status_interval_s", 1.0)),
+        "line_ending": str(ball_uart.get("line_ending", "\r\n")),
+        "wait_ready": bool(ball_uart.get("wait_ready", True)),
+        "left_endpoint_px": int(ball_uart.get("left_endpoint_px", 72)),
+        "right_endpoint_px": int(ball_uart.get("right_endpoint_px", 568)),
+        "servo_side": str(ball_uart.get("servo_side", "right")),
+    }
+
+
+def resolve_serial_settings(args: argparse.Namespace, mission: dict[str, Any]) -> dict[str, Any]:
+    """Legacy generic-serial settings retained for offline compatibility tests."""
+
+    explicit = bool(getattr(args, "serial", False)) or bool(getattr(args, "serial_port", None))
+    enabled = explicit or (
+        bool(mission["serial_enabled"]) and not bool(getattr(args, "video", None))
+    )
+    if bool(getattr(args, "no_serial", False)):
+        enabled = False
+    baudrate = mission["serial_baudrate"] if getattr(args, "baudrate", None) is None else args.baudrate
+    send_rate = mission["serial_send_rate_hz"] if getattr(args, "serial_rate", None) is None else args.serial_rate
     if baudrate <= 0:
         raise ConfigError("baudrate 必须为正整数")
     if send_rate <= 0:
@@ -360,7 +395,7 @@ class ControlProcessor:
 
 
 def _send_ack(
-    serial_service: SerialService,
+    serial_service: Any,
     packet: VmcPacket,
     result: AckResult,
     detail: int,
@@ -372,7 +407,7 @@ def _send_ack(
 
 
 def _handle_control_messages(
-    serial_service: SerialService,
+    serial_service: Any,
     processor: ControlProcessor,
     ack_sequence: int,
 ) -> int:
@@ -442,7 +477,7 @@ def run_application(
     mission: dict[str, Any],
     detector: BaseDetector,
     camera_source,
-    serial_service: SerialService,
+    serial_service: Any,
     detector_id: str | int = 0,
     camera_calibrated: bool = False,
     detector_factory: Any | None = None,
@@ -541,20 +576,8 @@ def main(argv: list[str] | None = None) -> int:
                 except ValueError as exc:
                     LOG.warning("忽略无效的触摸UI运行状态: %s", exc)
         detector_name = args.detector or mission["detector"]
-        if args.touch_ui and args.detector is None and touch_config is not None:
-            restored_detector = restored_ui_state.get("detector")
-            detector_name = (
-                restored_detector
-                if restored_detector in {
-                    "color",
-                    "shape",
-                    "steel_ball",
-                    "steel_ball_classical",
-                    "steel_ball_yolo_ncnn",
-                    "digit",
-                }
-                else touch_config.startup_detector
-            )
+        if args.touch_ui:
+            detector_name = "steel_ball_yolo_ncnn"
         detector = create_detector(
             detector_name,
             args.target or mission["target_color"],
@@ -568,8 +591,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         camera_config = load_camera_config(args.camera_config)
         camera_source = create_camera_source(args, mission, camera_config)
-        serial_settings = resolve_serial_settings(args, mission)
-        serial_service = SerialService(
+        serial_settings = resolve_ball_uart_settings(args, mission)
+        serial_service = BallUartClient(
             serial_settings.pop("port"),
             serial_settings.pop("baudrate"),
             **serial_settings,

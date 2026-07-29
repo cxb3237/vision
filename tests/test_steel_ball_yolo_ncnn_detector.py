@@ -17,7 +17,12 @@ from core.config_loader import (
     load_mission_config,
     load_steel_ball_ncnn_config,
 )
-from core.models import FramePacket, SteelBallNcnnConfig, TargetState
+from core.models import (
+    BallPositionMappingConfig,
+    FramePacket,
+    SteelBallNcnnConfig,
+    TargetState,
+)
 from detectors.base_detector import BaseDetector
 from detectors.steel_ball_detector import SteelBallDetector
 from detectors.steel_ball_yolo_ncnn_detector import (
@@ -210,7 +215,14 @@ def test_debug_mode_runs_ncnn_and_preview_without_publish(tmp_path: Path) -> Non
 
 
 def test_competition_mode_uses_existing_publish_gate(tmp_path: Path) -> None:
-    detector = _detector(FakeNcnnRuntime([[ _detection() ]]))
+    detector = _detector(
+        FakeNcnnRuntime([[_detection()]]),
+        position_mapping=BallPositionMappingConfig(
+            calibrated=True,
+            x_minus_125_px=0,
+            x_plus_125_px=100,
+        ),
+    )
     serial = FakeSerial(online=True)
     runtime = _runtime(
         tmp_path,
@@ -222,7 +234,7 @@ def test_competition_mode_uses_existing_publish_gate(tmp_path: Path) -> None:
     )
     runtime.run_forever()
     assert len(serial.published) == 1
-    assert serial.published[0][1] == "steel_ball_yolo_ncnn"
+    assert serial.published == [-50]
 
 
 def test_model_load_failure_keeps_camera_runtime_alive(tmp_path: Path) -> None:
@@ -331,4 +343,3 @@ def test_ncnn_config_rejects_out_of_range_values(tmp_path: Path, field: str, val
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(ConfigError, match=field):
         load_steel_ball_ncnn_config(path)
-

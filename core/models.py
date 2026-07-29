@@ -217,6 +217,15 @@ class SteelBallConfig:
 
 
 @dataclass(slots=True)
+class BallPositionMappingConfig:
+    """Two-point calibration from image X to lateral millimetres."""
+
+    calibrated: bool = False
+    x_minus_125_px: int = 0
+    x_plus_125_px: int = 639
+
+
+@dataclass(slots=True)
 class SteelBallNcnnConfig:
     """Lightweight NCNN steel-ball detector configuration."""
 
@@ -230,3 +239,6 @@ class SteelBallNcnnConfig:
     target_class: int = 100
     fallback_to_classical: bool = False
     debug_shapes: bool = False
+    position_mapping: BallPositionMappingConfig = field(
+        default_factory=BallPositionMappingConfig
+    )

@@ -170,6 +170,8 @@ def load_mission_config(
     data.setdefault("serial_reconnect_interval_s", 1.0)
     data.setdefault("serial_queue_size", 64)
     data.setdefault("serial_strict", False)
+    data.setdefault("serial_protocol_mode", "ball_ascii")
+    data.setdefault("ball_uart", {})
     required = (
         "default_mode",
         "detector",
@@ -189,6 +191,8 @@ def load_mission_config(
         "serial_reconnect_interval_s",
         "serial_queue_size",
         "serial_strict",
+        "serial_protocol_mode",
+        "ball_uart",
         "heartbeat_hz",
         "vision_result_hz",
         "display",
@@ -235,6 +239,45 @@ def load_mission_config(
         raise ConfigError("serial_queue_size 必须为正整数")
     if not isinstance(data["serial_strict"], bool):
         raise ConfigError("serial_strict 必须为布尔值")
+    if data["serial_protocol_mode"] not in {"ball_ascii", "hybrid_v10"}:
+        raise ConfigError("serial_protocol_mode 必须是 ball_ascii 或 hybrid_v10")
+    ball_uart = data["ball_uart"]
+    if not isinstance(ball_uart, dict):
+        raise ConfigError("ball_uart 必须为映射")
+    defaults = {
+        "enabled": data["serial_enabled"], "port": data["serial_port"],
+        "baudrate": 9600, "timeout_s": 0.02, "write_timeout_s": 0.05,
+        "reconnect_interval_s": 1.0, "send_rate_hz": 50.0,
+        "line_ending": "\r\n", "wait_ready": True, "ping_interval_s": 1.0,
+        "status_interval_s": 1.0, "left_endpoint_px": 72,
+        "right_endpoint_px": 568, "servo_side": "right",
+    }
+    unknown_ball_uart = sorted(set(ball_uart) - set(defaults))
+    if unknown_ball_uart:
+        raise ConfigError("ball_uart包含未知字段: " + ", ".join(unknown_ball_uart))
+    for name, value in defaults.items():
+        ball_uart.setdefault(name, value)
+    for name in ("enabled", "wait_ready"):
+        if not isinstance(ball_uart[name], bool):
+            raise ConfigError(f"ball_uart.{name} 必须为布尔值")
+    if not isinstance(ball_uart["port"], str) or not ball_uart["port"]:
+        raise ConfigError("ball_uart.port 必须为非空字符串")
+    for name in (
+        "baudrate", "timeout_s", "write_timeout_s", "reconnect_interval_s",
+        "send_rate_hz", "ping_interval_s", "status_interval_s",
+    ):
+        value = ball_uart[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(f"ball_uart.{name} 必须为正数")
+    for name in ("left_endpoint_px", "right_endpoint_px"):
+        if isinstance(ball_uart[name], bool) or not isinstance(ball_uart[name], int):
+            raise ConfigError(f"ball_uart.{name} 必须为整数")
+    if ball_uart["left_endpoint_px"] == ball_uart["right_endpoint_px"]:
+        raise ConfigError("ball_uart左右标定端点不能相同")
+    if ball_uart["servo_side"] not in {"left", "right"}:
+        raise ConfigError("ball_uart.servo_side 必须为 left 或 right")
+    if ball_uart["line_ending"] != "\r\n":
+        raise ConfigError("ball_uart.line_ending 必须为 \\r\\n")
     alpha = data["smoothing_alpha"]
     if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not 0 < alpha <= 1:
         raise ConfigError("smoothing_alpha 必须在 (0, 1] 范围内")
@@ -557,8 +600,14 @@ def load_steel_ball_ncnn_config(
 
     source = resolve_config_path(path)
     data = _read(source)
+    mapping_data = data.pop("position_mapping", {})
+    if not isinstance(mapping_data, dict):
+        raise ConfigError("steel_ball_ncnn.position_mapping must be a mapping")
     try:
-        config = SteelBallNcnnConfig(**data)
+        from core.models import BallPositionMappingConfig
+
+        mapping = BallPositionMappingConfig(**mapping_data)
+        config = SteelBallNcnnConfig(**data, position_mapping=mapping)
     except TypeError as exc:
         raise ConfigError(f"steel_ball_ncnn contains an unknown or missing field: {exc}") from exc
     if config.backend not in {"ncnn", "classical"}:
@@ -596,4 +645,23 @@ def load_steel_ball_ncnn_config(
     for name in ("fallback_to_classical", "debug_shapes"):
         if not isinstance(getattr(config, name), bool):
             raise ConfigError(f"steel_ball_ncnn.{name} must be boolean")
+    mapping = config.position_mapping
+    if not isinstance(mapping.calibrated, bool):
+        raise ConfigError("steel_ball_ncnn.position_mapping.calibrated must be boolean")
+    endpoint_names = (
+        "x_minus_125_px",
+        "x_plus_125_px",
+    )
+    for name in endpoint_names:
+        value = getattr(mapping, name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"steel_ball_ncnn.position_mapping.{name} must be an integer")
+    if (
+        mapping.calibrated
+        and mapping.x_minus_125_px
+        == mapping.x_plus_125_px
+    ):
+        raise ConfigError(
+            "steel_ball_ncnn.position_mapping endpoints must differ when calibrated"
+        )
     return config

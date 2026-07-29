@@ -1,0 +1,1729 @@
+diff --git a/README.md b/README.md
+index eebf6b5..33f5eb5 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,8 @@
+ 
+ 本工程面向 Raspberry Pi 4B 和普通 Windows/Linux 开发机，使用 USB UVC 摄像头完成
+ HSV 颜色检测、传统几何形状检测、单个印刷数字识别、直径 10 mm 钢球检测、目标时序跟踪、标定、录像和离线回放。可选的
+-VMC-Link V1.0 串口链路向 MSPM0G3507 发送视觉结果；MSPM0 始终拥有电机闭环和最终控制权。
++4字节钢球位置链路向 MSPM0G3507 发送横向毫米位置；通用VMC控制、心跳和ACK链路继续保留，
++MSPM0 始终拥有电机闭环和最终控制权。
+ 
+ 当前不包含云台/GPIO 控制、云平台、神经网络数字识别或单目测距。`RECOGNIZE`、`MEASURE`、
+ `AIM` 和 `RETURN_CENTER` 控制请求会返回 `UNSUPPORTED`。`CALIBRATION` 是不发送普通
+@@ -114,8 +115,8 @@ python3 -m tools.digit_tuner \
+ ```bash
+ python3 app.py \
+   --mode track \
+-  --detector digit \
+-  --digit-config config/digit.yaml \
++  --detector steel_ball_yolo_ncnn \
++  --steel-ball-ncnn-config config/steel_ball_ncnn.yaml \
+   --no-serial \
+   --display
+ ```
+@@ -313,43 +314,37 @@ OpenCV 属性编号 14 是 `CAP_PROP_GAIN`。部分 UVC 摄像头不支持手动
+ 或 `--serial-port` 才会启用。端口打开只表示 `port_open`，程序依据最近收到的有效对端包判断
+ `peer_alive` 和 `SERIAL_LINK_DOWN`。
+ 
+-串口发送将 ACK/URGENT 放入关键队列，普通消息批量发送；VMC-Link v1固定结果通道只保留最新
+-一帧，并由串口线程按默认20Hz发送，因此摄像头和检测主循环不会等待串口写操作。固定视觉结果
+-仅在比赛模式下发布；调试模式仍运行检测和网页预览，但不会向MSPM0发送34字节视觉结果包。
++串口发送将 ACK/URGENT 放入关键队列，普通消息批量发送；钢球位置通道只保留最新位置，并由
++串口线程按默认20Hz发送，因此摄像头和检测主循环不会等待串口写操作。位置包仅在位置下发启用、
++检测到钢球且两点映射已经标定时发布；调试模式仍运行检测和网页预览，但不发送位置包。
+ `VISION_CONTROL` 只有带 `ACK_REQ` 时才要求回复。重复的 `SEQ + request_id` 返回缓存结果，不会
+ 再次切换模式或重置 Tracker。
+ 
+-## VMC-Link v1 固定视觉结果协议
++## 钢球4字节位置协议
+ 
+-树莓派向MSPM0发送的视觉结果固定为34字节。所有多字节整数均为小端；CRC使用
+-CRC-16/CCITT-FALSE（多项式`0x1021`、初值`0xFFFF`、xorout `0x0000`），计算范围为偏移2的
+-`version`至偏移31的`flags`，不包括帧头和CRC字段。
++旧34字节视觉结果包已停止用于运行时发送。树莓派向MSPM0发送的新位置包固定为4字节，只包含
++横向位置`x_mm`。CRC使用CRC-8/ATM（poly=`0x07`、init=`0x00`、refin/refout=false、
++xorout=`0x00`），计算范围是前三个字节。
+ 
+ | 偏移 | 长度 | 类型 | 字段 | 约定 |
+ | ---: | ---: | --- | --- | --- |
+-| 0 | 1 | uint8 | SOF1 | `0xAA` |
+-| 1 | 1 | uint8 | SOF2 | `0x55` |
+-| 2 | 1 | uint8 | version | `1` |
+-| 3 | 1 | uint8 | msg_type | `0x01` |
+-| 4 | 1 | uint8 | payload_length | `27` |
+-| 5 | 2 | uint16 | sequence | 每个实际发送包加1，`65535→0` |
+-| 7 | 4 | uint32 | timestamp_ms | 采集时间毫秒 |
+-| 11 | 1 | uint8 | detector_id | none/color/shape/steel_ball/digit=`0/1/2/3/4` |
+-| 12 | 1 | uint8 | state | NONE/CANDIDATE/LOCKED/OCCLUDED/LOST=`0/1/2/3/4` |
+-| 13 | 2 | uint16 | target_class | 沿用检测器类别；数字为`100～109` |
+-| 15 | 2 | int16 | center_x_px | 无目标为`-1` |
+-| 17 | 2 | int16 | center_y_px | 无目标为`-1` |
+-| 19 | 2 | int16 | error_x_permille | 相对画面中心，裁剪至`-1000～1000` |
+-| 21 | 2 | int16 | error_y_permille | 下正上负，裁剪至`-1000～1000` |
+-| 23 | 2 | uint16 | bbox_width_px | 无目标为`0` |
+-| 25 | 2 | uint16 | bbox_height_px | 无目标为`0` |
+-| 27 | 2 | uint16 | confidence_permille | `0～1000` |
+-| 29 | 2 | uint16 | distance_mm | 未知为`65535` |
+-| 31 | 1 | uint8 | flags | bit0发现、bit1锁定、bit2距离有效、bit3已标定 |
+-| 32 | 2 | uint16 | crc16 | 小端CRC |
+-
+-项目内部`TargetState`的枚举顺序保持不变，编码层会显式转换为上述线上状态。未发现目标时仍会
+-发送对应的NONE、OCCLUDED或LOST状态，同时清零类别、bbox、置信度和误差。
++| 0 | 1 | uint8 | SOF1 | `0xA5` |
++| 1 | 1 | uint8 | SOF2 | `0x5A` |
++| 2 | 1 | int8 | x_mm | `-125～125` |
++| 3 | 1 | uint8 | crc8 | 对字节0～2计算 |
++
++测试向量为：`-125 → A5 5A 83 86`、`0 → A5 5A 00 06`、
++`+125 → A5 5A 7D 72`。无有效钢球目标时不发送任何位置包，并清除尚未消费的旧位置。
++
++两点映射在`config/steel_ball_ncnn.yaml`中配置。`calibrated: false`是安全默认值，完成现场标定后
++填写钢球位于-125 mm和+125 mm时的像素X并设为true；允许端点反向，以支持摄像头反向安装：
++
++```yaml
++position_mapping:
++  calibrated: false
++  x_minus_125_px: 0
++  x_plus_125_px: 639
++```
+ 
+ `config/mission.yaml`中的串口相关配置为：
+ 
+@@ -363,14 +358,14 @@ serial_queue_size: 64
+ serial_strict: false
+ ```
+ 
+-`serial_queue_size`只用于双向控制、ACK和普通消息的收发队列。固定视觉结果不进入这些FIFO；
+-它始终通过`_latest_result`单槽只保存最新一帧，因此即使MSPM0暂时读取变慢，也不会积压旧结果
++`serial_queue_size`只用于双向控制、ACK和普通消息的收发队列。钢球位置不进入这些FIFO；
++它始终通过最新位置单槽只保存最新值，因此即使MSPM0暂时读取变慢，也不会积压旧结果
+ 或拖慢检测线程。
+ 
+ 实时发送示例：
+ 
+ ```bash
+-python3 app.py --mode track --detector color --target red \
++python3 app.py --mode track --detector steel_ball_yolo_ncnn \
+   --serial-port /dev/ttyUSB0 --baudrate 115200 --serial-rate 20
+ ```
+ 
+@@ -403,8 +398,8 @@ MSPM0端可直接移植`mcu_reference/vmc_link.c`和`vmc_link.h`。该解析器
+ 
+ ## 兼容的双向控制负载
+ 
+-工程原有的可变长控制帧接口继续保留，用于心跳、ACK和`VISION_CONTROL`，不会影响固定34字节
+-视觉结果编码器和解析器：
++工程原有的`AA 55`可变长控制帧接口继续保留，用于心跳、ACK和`VISION_CONTROL`；其格式和
++MCU发给树莓派的控制行为没有修改，也不会与`A5 5A`位置帧头混淆：
+ 
+ | 负载 | 格式 | 字节数 |
+ | --- | --- | ---: |
+@@ -466,9 +461,10 @@ python3 app.py \
+ 
+ ### 页面和现场参数
+ 
+-主页显示标注预览、检测器、类别、状态、置信度、中心和误差、FPS、摄像头/串口状态及VMC发送
+-计数。切换数字、颜色、形状或钢球检测器只替换运行时检测器，不会重启摄像头和串口；新检测器
+-初始化失败时保留旧检测器。
++触摸主页固定使用钢球YOLO-NCNN，显示标注预览、醒目的毫米横向位置、FPS、模型加载和推理耗时、
++摄像头/串口状态及位置包发送计数。正位置显示`+`，没有目标或未标定时显示`-- mm`。网页不再
++提供数字、颜色、形状或传统CV检测器入口；这些后端源码和后端检测器工厂仍保留。历史
++`runtime/touch_ui_state.yaml`中的检测器选择不会覆盖触摸模式的固定选择。
+ 
+ 摄像头参数页根据`v4l2-ctl --list-ctrls-menus`实际结果，只显示当前摄像头支持且可写的控制项；
+ 不支持、只读、当前不可写、范围无效或缺少枚举选项的控制不会占用小屏幕空间。主面板使用中文
+@@ -492,8 +488,8 @@ python3 app.py \
+ `GET /api/config/camera`并完整重建滑动条状态；`requested`、`actual`、范围、步进、支持状态和
+ `MISMATCH`不会沿用恢复前的浏览器本地对象。命令进入`FAILED`时保留当前界面值并显示后端错误。
+ 
+-比赛模式隐藏全部参数控件并由后端拒绝普通修改请求，摄像头、检测、UART和Web服务继续运行。
+-只有比赛模式会持续向MSPM0发送固定视觉结果；退出比赛模式会立即清除尚未发送的旧结果，调试
++位置下发启用后，后台继续使用原比赛模式状态机锁定现场参数；摄像头、检测、UART和Web服务继续运行。
++只有启用位置下发、目标有效且位置映射已标定时才向MSPM0发送4字节位置；退出会立即清除尚未发送的旧位置，调试
+ 模式只保留网页识别预览。程序每次启动默认进入调试模式，只有本次命令行明确给出
+ `--competition-mode`才直接启用视觉输出，保存的UI状态不会跨重启恢复该开关。触摸屏需
+ 长按右上角维护按钮约2秒才能打开维护菜单，比赛模式下入口仍保留。退出比赛模式、退出kiosk和
+@@ -533,15 +529,8 @@ PID文件，验证当前用户、浏览器名称、`--kiosk`参数以及项目
+ 退出码为0。systemd使用`Restart=on-failure`：崩溃会重启，UI正常停止不会立即重启，系统下次
+ 开机仍会因服务已enable而启动。
+ 
+-systemd模板不写死检测器。启动检测器按“命令行明确值 > `runtime/touch_ui_state.yaml`保存值 >
+-`config/touch_ui.yaml`的`startup.detector`”选择。最终检测器为`digit`时，安装脚本要求
+-`data/digits/templates/0`到`9`每类至少有一张能被OpenCV读取的PNG，否则列出缺失数字并拒绝
+-安装；不会生成虚假模板。数字模板必须在Raspberry Pi现场采集后同步进仓库或最终部署目录。
+-可单独执行部署检查：
+-
+-```bash
+-python3 -m tools.check_digit_templates --detector digit
+-```
++触摸模式固定启动`steel_ball_yolo_ncnn`，不恢复历史检测器选择；非触摸命令行和后端检测器工厂仍
++保持兼容。部署前请确认NCNN模型目录完整，并在树莓派现场完成两点位置标定。
+ 
+ 查看与控制：
+ 
+diff --git a/app.py b/app.py
+index e3a094d..4c546f3 100644
+--- a/app.py
++++ b/app.py
+@@ -541,20 +541,8 @@ def main(argv: list[str] | None = None) -> int:
+                 except ValueError as exc:
+                     LOG.warning("忽略无效的触摸UI运行状态: %s", exc)
+         detector_name = args.detector or mission["detector"]
+-        if args.touch_ui and args.detector is None and touch_config is not None:
+-            restored_detector = restored_ui_state.get("detector")
+-            detector_name = (
+-                restored_detector
+-                if restored_detector in {
+-                    "color",
+-                    "shape",
+-                    "steel_ball",
+-                    "steel_ball_classical",
+-                    "steel_ball_yolo_ncnn",
+-                    "digit",
+-                }
+-                else touch_config.startup_detector
+-            )
++        if args.touch_ui:
++            detector_name = "steel_ball_yolo_ncnn"
+         detector = create_detector(
+             detector_name,
+             args.target or mission["target_color"],
+diff --git a/config/steel_ball_ncnn.yaml b/config/steel_ball_ncnn.yaml
+index c17c3f4..565fe45 100644
+--- a/config/steel_ball_ncnn.yaml
++++ b/config/steel_ball_ncnn.yaml
+@@ -8,3 +8,7 @@ num_threads: 4
+ target_class: 100
+ fallback_to_classical: false
+ debug_shapes: false
++position_mapping:
++  calibrated: false
++  x_minus_125_px: 0
++  x_plus_125_px: 639
+diff --git a/config/touch_ui.yaml b/config/touch_ui.yaml
+index fda3ae5..c214f64 100644
+--- a/config/touch_ui.yaml
++++ b/config/touch_ui.yaml
+@@ -8,7 +8,7 @@ preview:
+   max_width: 960
+ 
+ startup:
+-  detector: digit
++  detector: steel_ball_yolo_ncnn
+   restore_runtime_overrides: true
+   competition_mode: false
+ 
+diff --git a/core/config_loader.py b/core/config_loader.py
+index 0c38b6a..0732760 100644
+--- a/core/config_loader.py
++++ b/core/config_loader.py
+@@ -557,8 +557,14 @@ def load_steel_ball_ncnn_config(
+ 
+     source = resolve_config_path(path)
+     data = _read(source)
++    mapping_data = data.pop("position_mapping", {})
++    if not isinstance(mapping_data, dict):
++        raise ConfigError("steel_ball_ncnn.position_mapping must be a mapping")
+     try:
+-        config = SteelBallNcnnConfig(**data)
++        from core.models import BallPositionMappingConfig
++
++        mapping = BallPositionMappingConfig(**mapping_data)
++        config = SteelBallNcnnConfig(**data, position_mapping=mapping)
+     except TypeError as exc:
+         raise ConfigError(f"steel_ball_ncnn contains an unknown or missing field: {exc}") from exc
+     if config.backend not in {"ncnn", "classical"}:
+@@ -596,4 +602,23 @@ def load_steel_ball_ncnn_config(
+     for name in ("fallback_to_classical", "debug_shapes"):
+         if not isinstance(getattr(config, name), bool):
+             raise ConfigError(f"steel_ball_ncnn.{name} must be boolean")
++    mapping = config.position_mapping
++    if not isinstance(mapping.calibrated, bool):
++        raise ConfigError("steel_ball_ncnn.position_mapping.calibrated must be boolean")
++    endpoint_names = (
++        "x_minus_125_px",
++        "x_plus_125_px",
++    )
++    for name in endpoint_names:
++        value = getattr(mapping, name)
++        if isinstance(value, bool) or not isinstance(value, int):
++            raise ConfigError(f"steel_ball_ncnn.position_mapping.{name} must be an integer")
++    if (
++        mapping.calibrated
++        and mapping.x_minus_125_px
++        == mapping.x_plus_125_px
++    ):
++        raise ConfigError(
++            "steel_ball_ncnn.position_mapping endpoints must differ when calibrated"
++        )
+     return config
+diff --git a/core/models.py b/core/models.py
+index e516eee..502b9c2 100644
+--- a/core/models.py
++++ b/core/models.py
+@@ -216,6 +216,15 @@ class SteelBallConfig:
+     hough_max_radius: int = 80
+ 
+ 
++@dataclass(slots=True)
++class BallPositionMappingConfig:
++    """Two-point calibration from image X to lateral millimetres."""
++
++    calibrated: bool = False
++    x_minus_125_px: int = 0
++    x_plus_125_px: int = 639
++
++
+ @dataclass(slots=True)
+ class SteelBallNcnnConfig:
+     """Lightweight NCNN steel-ball detector configuration."""
+@@ -230,3 +239,6 @@ class SteelBallNcnnConfig:
+     target_class: int = 100
+     fallback_to_classical: bool = False
+     debug_shapes: bool = False
++    position_mapping: BallPositionMappingConfig = field(
++        default_factory=BallPositionMappingConfig
++    )
+diff --git a/core/vision_runtime.py b/core/vision_runtime.py
+index db5b03f..dfa8d27 100644
+--- a/core/vision_runtime.py
++++ b/core/vision_runtime.py
+@@ -12,8 +12,9 @@ from typing import Any, Callable
+ 
+ import cv2
+ 
++from core.ball_position_mapping import pixel_x_to_mm
+ from core.fault_manager import Fault, FaultManager
+-from core.models import CameraConfig, VisionResult
++from core.models import BallPositionMappingConfig, CameraConfig, VisionResult
+ from core.performance_metrics import RollingRate, RollingSamples
+ from core.state_machine import VisionMode
+ from detectors.digit_detector import DigitDetector
+@@ -153,6 +154,10 @@ class VisionRuntime:
+                 "camera_online": False,
+                 "serial_online": False,
+                 "vmc_tx_count": 0,
++                "position_tx_count": 0,
++                "ball_x_px": None,
++                "ball_x_mm": None,
++                "ball_position_calibrated": self._position_mapping().calibrated,
+                 "mode": control_processor.state_machine.mode.name,
+                 "runtime_modified": False,
+                 "competition_mode": bool(initial_competition_mode),
+@@ -449,9 +454,28 @@ class VisionRuntime:
+             old.reset()
+         if hasattr(old, "close"):
+             old.close()
+-        self.state_store.update(detector=name, last_error="", **self._detector_status())
++        self.state_store.update(
++            detector=name,
++            last_error="",
++            ball_position_calibrated=self._position_mapping().calibrated,
++            **self._detector_status(),
++        )
+         LOG.info("检测器已切换: %s", name)
+ 
++    def _position_mapping(self) -> BallPositionMappingConfig:
++        mapping = getattr(getattr(self.detector, "config", None), "position_mapping", None)
++        if isinstance(mapping, BallPositionMappingConfig):
++            return mapping
++        return BallPositionMappingConfig()
++
++    def _ball_position(
++        self, result: VisionResult | None
++    ) -> tuple[int | None, int | None]:
++        if result is None or not result.found or result.center_x < 0:
++            return None, None
++        x_px = int(result.center_x)
++        return x_px, pixel_x_to_mm(x_px, self._position_mapping())
++
+     def _reset_vision_measurement_window(self) -> None:
+         """Reset recent-rate/latency windows without erasing cumulative counters."""
+ 
+@@ -534,7 +558,7 @@ class VisionRuntime:
+ 
+     def _set_competition(self, enabled: bool) -> None:
+         if enabled:
+-            self.serial_service.discard_pending_result()
++            self.serial_service.discard_pending_ball_position()
+             self.state_store.update(
+                 competition_mode=True,
+                 vision_output_enabled=True,
+@@ -545,7 +569,7 @@ class VisionRuntime:
+                 competition_mode=False,
+                 vision_output_enabled=False,
+             )
+-            self.serial_service.discard_pending_result()
++            self.serial_service.discard_pending_ball_position()
+             LOG.info("比赛模式视觉输出已禁用。")
+         if self.persistence is not None:
+             self.persistence.save_ui_state(enabled, self.current_detector_name)
+@@ -767,6 +791,13 @@ class VisionRuntime:
+                 "preview_pending": False,
+             }
+         )
++        ball_x_px, ball_x_mm = self._ball_position(result)
++        position_tx_count = int(
++            serial_stats.get(
++                "position_tx_count", serial_stats.get("vmc_tx_count", 0)
++            )
++            or 0
++        )
+         self.state_store.update(
+             target_class=int(result.target_class) if found and result else 0,
+             state=state_names.get(target_state, "NONE"),
+@@ -795,7 +826,11 @@ class VisionRuntime:
+             camera_reconnects=int(camera_stats.get("reconnects", 0) or 0),
+             camera_online=camera_online,
+             serial_online=serial_online,
+-            vmc_tx_count=int(serial_stats.get("tx_count", 0)),
++            position_tx_count=position_tx_count,
++            vmc_tx_count=position_tx_count,
++            ball_x_px=ball_x_px,
++            ball_x_mm=ball_x_mm,
++            ball_position_calibrated=self._position_mapping().calibrated,
+             mode=self.control_processor.state_machine.mode.name,
+             vision_output_enabled=bool(
+                 self.state_store.snapshot().get("competition_mode", False)
+@@ -833,7 +868,7 @@ class VisionRuntime:
+         last_frame_seen = started
+         last_frame_id: int | None = None
+         service_sequence = 0
+-        hybrid_v10 = self.mission["serial_protocol_mode"] == "hybrid_v10"
++        hybrid_v10 = self.mission.get("serial_protocol_mode", "hybrid_v10") == "hybrid_v10"
+         processed = 0
+         process_time_total = 0.0
+         display = (bool(getattr(self.args, "display", False)) or bool(self.mission["display"])) and not bool(
+@@ -929,15 +964,14 @@ class VisionRuntime:
+                         self.state_store.update(last_error=str(exc))
+                         LOG.exception("检测器处理失败")
+                     process_time_total += time.monotonic() - process_start
+-                    if (
+-                        result is not None
+-                        and self.state_store.snapshot().get("competition_mode", False)
+-                    ):
+-                        self.serial_service.publish_result(
+-                            result,
+-                            self.detector_id,
+-                            camera_calibrated=self.camera_calibrated,
+-                        )
++                _ball_x_px, ball_x_mm = self._ball_position(result)
++                if (
++                    ball_x_mm is not None
++                    and self.state_store.snapshot().get("competition_mode", False)
++                ):
++                    self.serial_service.publish_ball_position(ball_x_mm)
++                else:
++                    self.serial_service.discard_pending_ball_position()
+ 
+                 annotated = None
+                 if self.touch_config is not None:
+diff --git a/drivers/serial_service.py b/drivers/serial_service.py
+index 45f9f76..cf42ead 100644
+--- a/drivers/serial_service.py
++++ b/drivers/serial_service.py
+@@ -12,13 +12,11 @@ from typing import Any
+ 
+ from protocol.vmc_messages import Flags, MessageType
+ from protocol.vmc_protocol import VmcPacket, VmcStreamParser, encode_packet
+-from protocol.vmc_link import (
+-    DetectorID,
+-    VMCLinkResult,
+-    encode_result_packet,
+-    result_to_vmc_link,
++from protocol.ball_position_link import (
++    BALL_POSITION_PACKET_SIZE,
++    BALL_POSITION_SOF,
++    encode_ball_position,
+ )
+-from core.models import VisionResult
+ 
+ 
+ LOG = logging.getLogger(__name__)
+@@ -69,11 +67,10 @@ class SerialService:
+         self._send_queue: queue.Queue[bytes] = queue.Queue(maxsize=queue_size)
+         self._stream_lock = threading.Lock()
+         self._latest_stream: bytes | None = None
+-        self._result_lock = threading.Lock()
+-        self._latest_result: VMCLinkResult | None = None
+-        self._result_sequence = 0
++        self._position_lock = threading.Lock()
++        self._latest_ball_position: tuple[int, bytes] | None = None
+         self._send_rate_hz = float(send_rate_hz)
+-        self._next_result_send = 0.0
++        self._next_ball_position_send = 0.0
+         self._parser = VmcStreamParser()
+         self._stats_lock = threading.Lock()
+         self._reconnects = 0
+@@ -83,7 +80,8 @@ class SerialService:
+         self._rx_queue_drops = 0
+         self._tx_queue_drops = 0
+         self._stream_replacements = 0
+-        self._result_replacements = 0
++        self._position_replacements = 0
++        self._position_tx_count = 0
+         self._last_rx_monotonic: float | None = None
+         self._last_valid_packet_monotonic: float | None = None
+         self._last_heartbeat_monotonic: float | None = None
+@@ -103,10 +101,9 @@ class SerialService:
+         self._drain(self._send_queue)
+         with self._stream_lock:
+             self._latest_stream = None
+-        with self._result_lock:
+-            self._latest_result = None
+-            self._result_sequence = 0
+-            self._next_result_send = 0.0
++        with self._position_lock:
++            self._latest_ball_position = None
++            self._next_ball_position_send = 0.0
+         self._parser = VmcStreamParser()
+         self._startup_event.clear()
+         self._startup_error = None
+@@ -197,15 +194,16 @@ class SerialService:
+         except queue.Empty:
+             pass
+         now = time.monotonic()
+-        with self._result_lock:
+-            if self._latest_result is not None and now >= self._next_result_send:
+-                result = self._latest_result.with_sequence(self._result_sequence)
+-                self._latest_result = None
+-                self._result_sequence = (self._result_sequence + 1) & 0xFFFF
+-                self._next_result_send = now + 1.0 / self._send_rate_hz
+-                data = encode_result_packet(result, sequence=result.sequence)
++        with self._position_lock:
++            if (
++                self._latest_ball_position is not None
++                and now >= self._next_ball_position_send
++            ):
++                x_mm, data = self._latest_ball_position
++                self._latest_ball_position = None
++                self._next_ball_position_send = now + 1.0 / self._send_rate_hz
+                 if self.serial_debug:
+-                    LOG.info("VMC-Link TX seq=%d %s", result.sequence, data.hex(" "))
++                    LOG.info("Ball position TX x_mm=%+d bytes=%s", x_mm, data.hex(" "))
+                 return data
+         try:
+             return self._send_queue.get_nowait()
+@@ -231,6 +229,11 @@ class SerialService:
+             sent += 1
+             with self._stats_lock:
+                 self._tx_packets += 1
++                if (
++                    len(data) == BALL_POSITION_PACKET_SIZE
++                    and data.startswith(BALL_POSITION_SOF)
++                ):
++                    self._position_tx_count += 1
+         return sent
+ 
+     def _record_received(self, data: bytes, packets: list[VmcPacket]) -> None:
+@@ -349,35 +352,24 @@ class SerialService:
+             LOG.warning("串口%s队列已满", "关键" if target_queue is self._critical_queue else "发送")
+             return False
+ 
+-    def publish_result(
+-        self,
+-        result: VisionResult,
+-        detector_id: str | int | DetectorID,
+-        *,
+-        camera_calibrated: bool = False,
+-    ) -> bool:
+-        """非阻塞提交最新视觉结果；旧的未发送结果会被覆盖。"""
++    def publish_ball_position(self, x_mm: int) -> bool:
++        """非阻塞提交最新钢球位置；旧的未发送位置会被覆盖。"""
+ 
++        packet = encode_ball_position(x_mm)
+         if not self.enabled or not self.is_running() or self._stop_event.is_set():
+             return False
+-        snapshot = result_to_vmc_link(
+-            result,
+-            sequence=0,
+-            detector_id=detector_id,
+-            camera_calibrated=camera_calibrated,
+-        )
+-        with self._result_lock:
+-            if self._latest_result is not None:
++        with self._position_lock:
++            if self._latest_ball_position is not None:
+                 with self._stats_lock:
+-                    self._result_replacements += 1
+-            self._latest_result = snapshot
++                    self._position_replacements += 1
++            self._latest_ball_position = (x_mm, packet)
+         return True
+ 
+-    def discard_pending_result(self) -> None:
+-        """丢弃尚未发送的固定视觉结果，不影响序号或串口生命周期。"""
++    def discard_pending_ball_position(self) -> None:
++        """丢弃尚未发送的位置，不影响其他队列或串口生命周期。"""
+ 
+-        with self._result_lock:
+-            self._latest_result = None
++        with self._position_lock:
++            self._latest_ball_position = None
+ 
+     def raise_if_failed(self) -> None:
+         """严格模式下把后台串口错误传播给主循环。"""
+@@ -417,8 +409,9 @@ class SerialService:
+                 "rx_queue_drops": self._rx_queue_drops,
+                 "tx_queue_drops": self._tx_queue_drops,
+                 "stream_replacements": self._stream_replacements,
+-                "result_replacements": self._result_replacements,
+-                "result_sequence": self._result_sequence,
++                "position_tx_count": self._position_tx_count,
++                "position_replacements": self._position_replacements,
++                "vmc_tx_count": self._position_tx_count,
+                 "critical_queue_size": self._critical_queue.qsize(),
+                 "send_queue_size": self._send_queue.qsize(),
+             }
+diff --git a/mcu_reference/README.md b/mcu_reference/README.md
+index 4d54ae7..14a68eb 100644
+--- a/mcu_reference/README.md
++++ b/mcu_reference/README.md
+@@ -1,25 +1,25 @@
+-# MSPM0 VMC-Link v1 参考解析器
++# MSPM0 钢球4字节位置参考解析器
+ 
+ `vmc_link.c/.h` 是不依赖具体 HAL、无 `malloc` 的标准 C 实现。将两个文件加入
+ MSPM0 工程，在 UART 接收中断或 DMA 字节处理循环中逐字节调用：
+ 
+ ```c
+-static vmc_link_parser_t parser;
+-static vmc_link_result_t latest_result;
++static ball_position_parser_t parser;
++static ball_position_packet_t latest_position;
+ 
+ void vision_uart_init(void) {
+-    vmc_link_parser_init(&parser);
++    ball_position_parser_init(&parser);
+ }
+ 
+ void vision_uart_rx_byte(uint8_t byte) {
+-    if (vmc_link_feed_byte(&parser, byte, &latest_result)) {
+-        /* CRC 已通过；在主循环中消费 latest_result。 */
++    if (ball_position_feed_byte(&parser, byte, &latest_position)) {
++        /* CRC 已通过；在主循环中消费 latest_position.x_mm。 */
+     }
+ }
+ ```
+ 
+-DMA 接收时，对本次新增的每个字节依次调用 `vmc_link_feed_byte()` 即可。解析器内部
+-缓存固定为34字节，支持半包、连续包、帧头搜索、CRC错误和重新同步。
++DMA 接收时，对本次新增的每个字节依次调用 `ball_position_feed_byte()` 即可。解析器内部
++缓存固定为4字节，支持半包、连续包、帧头搜索、CRC错误和重新同步。
+ 
+ ## 电气连接
+ 
+diff --git a/mcu_reference/vmc_link.c b/mcu_reference/vmc_link.c
+index b30bda5..90d5f17 100644
+--- a/mcu_reference/vmc_link.c
++++ b/mcu_reference/vmc_link.c
+@@ -2,131 +2,87 @@
+ 
+ #include <string.h>
+ 
+-static uint16_t read_u16_le(const uint8_t *data) {
+-    return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+-}
+-
+-static int16_t read_i16_le(const uint8_t *data) {
+-    return (int16_t)read_u16_le(data);
+-}
+-
+-static uint32_t read_u32_le(const uint8_t *data) {
+-    return (uint32_t)data[0]
+-        | ((uint32_t)data[1] << 8)
+-        | ((uint32_t)data[2] << 16)
+-        | ((uint32_t)data[3] << 24);
+-}
+-
+-void vmc_link_parser_init(vmc_link_parser_t *parser) {
++void ball_position_parser_init(ball_position_parser_t *parser) {
+     if (parser != NULL) {
+         memset(parser, 0, sizeof(*parser));
+     }
+ }
+ 
+-uint16_t vmc_link_crc16_ccitt_false(const uint8_t *data, size_t length) {
+-    uint16_t crc = 0xFFFFu;
++uint8_t ball_position_crc8_atm(const uint8_t *data, size_t length) {
++    uint8_t crc = 0u;
+     size_t index;
+     uint8_t bit;
+     for (index = 0u; index < length; ++index) {
+-        crc ^= (uint16_t)data[index] << 8;
++        crc ^= data[index];
+         for (bit = 0u; bit < 8u; ++bit) {
+-            if ((crc & 0x8000u) != 0u) {
+-                crc = (uint16_t)((crc << 1) ^ 0x1021u);
+-            } else {
+-                crc = (uint16_t)(crc << 1);
+-            }
++            crc = (crc & 0x80u) != 0u
++                ? (uint8_t)((crc << 1) ^ 0x07u)
++                : (uint8_t)(crc << 1);
+         }
+     }
+     return crc;
+ }
+ 
+-static bool header_valid(const uint8_t *data) {
+-    return data[0] == VMC_LINK_SOF1
+-        && data[1] == VMC_LINK_SOF2
+-        && data[2] == VMC_LINK_VERSION
+-        && data[3] == VMC_LINK_RESULT_TYPE
+-        && data[4] == VMC_LINK_PAYLOAD_LENGTH;
+-}
+-
+-static void resynchronize(vmc_link_parser_t *parser) {
++static void resynchronize(ball_position_parser_t *parser) {
+     uint8_t position;
+     for (position = 1u; position + 1u < parser->length; ++position) {
+-        if (parser->buffer[position] == VMC_LINK_SOF1
+-                && parser->buffer[position + 1u] == VMC_LINK_SOF2) {
++        if (parser->buffer[position] == BALL_POSITION_SOF1
++                && parser->buffer[position + 1u] == BALL_POSITION_SOF2) {
+             uint8_t remaining = (uint8_t)(parser->length - position);
+             memmove(parser->buffer, &parser->buffer[position], remaining);
+             parser->length = remaining;
+             return;
+         }
+     }
+-    if (parser->buffer[parser->length - 1u] == VMC_LINK_SOF1) {
+-        parser->buffer[0] = VMC_LINK_SOF1;
++    if (parser->length > 0u
++            && parser->buffer[parser->length - 1u] == BALL_POSITION_SOF1) {
++        parser->buffer[0] = BALL_POSITION_SOF1;
+         parser->length = 1u;
+     } else {
+         parser->length = 0u;
+     }
+ }
+ 
+-static void decode_result(const uint8_t *data, vmc_link_result_t *out) {
+-    out->sequence = read_u16_le(&data[5]);
+-    out->timestamp_ms = read_u32_le(&data[7]);
+-    out->detector_id = data[11];
+-    out->state = data[12];
+-    out->target_class = read_u16_le(&data[13]);
+-    out->center_x_px = read_i16_le(&data[15]);
+-    out->center_y_px = read_i16_le(&data[17]);
+-    out->error_x_permille = read_i16_le(&data[19]);
+-    out->error_y_permille = read_i16_le(&data[21]);
+-    out->bbox_width_px = read_u16_le(&data[23]);
+-    out->bbox_height_px = read_u16_le(&data[25]);
+-    out->confidence_permille = read_u16_le(&data[27]);
+-    out->distance_mm = read_u16_le(&data[29]);
+-    out->flags = data[31];
+-}
+-
+-bool vmc_link_feed_byte(
+-    vmc_link_parser_t *parser,
++bool ball_position_feed_byte(
++    ball_position_parser_t *parser,
+     uint8_t byte,
+-    vmc_link_result_t *out
++    ball_position_packet_t *out
+ ) {
+-    uint16_t received_crc;
+-    uint16_t calculated_crc;
++    int8_t x_mm;
+     if (parser == NULL || out == NULL) {
+         return false;
+     }
+     if (parser->length == 0u) {
+-        if (byte == VMC_LINK_SOF1) {
++        if (byte == BALL_POSITION_SOF1) {
+             parser->buffer[0] = byte;
+             parser->length = 1u;
+         }
+         return false;
+     }
+     if (parser->length == 1u) {
+-        if (byte == VMC_LINK_SOF2) {
++        if (byte == BALL_POSITION_SOF2) {
+             parser->buffer[1] = byte;
+             parser->length = 2u;
+-        } else if (byte != VMC_LINK_SOF1) {
++        } else if (byte != BALL_POSITION_SOF1) {
+             parser->length = 0u;
+         }
+         return false;
+     }
+     parser->buffer[parser->length++] = byte;
+-    if (parser->length == 5u && !header_valid(parser->buffer)) {
+-        parser->header_error_count++;
+-        resynchronize(parser);
++    if (parser->length < BALL_POSITION_PACKET_SIZE) {
+         return false;
+     }
+-    if (parser->length < VMC_LINK_PACKET_SIZE) {
++    if (ball_position_crc8_atm(parser->buffer, 3u) != parser->buffer[3]) {
++        parser->crc_error_count++;
++        resynchronize(parser);
+         return false;
+     }
+-    received_crc = read_u16_le(&parser->buffer[32]);
+-    calculated_crc = vmc_link_crc16_ccitt_false(&parser->buffer[2], 30u);
+-    if (received_crc != calculated_crc) {
+-        parser->crc_error_count++;
++    x_mm = (int8_t)parser->buffer[2];
++    if (x_mm < BALL_POSITION_MIN_MM || x_mm > BALL_POSITION_MAX_MM) {
+         resynchronize(parser);
+         return false;
+     }
+-    decode_result(parser->buffer, out);
++    out->x_mm = x_mm;
+     parser->good_count++;
+     parser->length = 0u;
+     return true;
+diff --git a/mcu_reference/vmc_link.h b/mcu_reference/vmc_link.h
+index b3eb222..6bd2d14 100644
+--- a/mcu_reference/vmc_link.h
++++ b/mcu_reference/vmc_link.h
+@@ -5,44 +5,29 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
+-#define VMC_LINK_PACKET_SIZE 34u
+-#define VMC_LINK_SOF1 0xAAu
+-#define VMC_LINK_SOF2 0x55u
+-#define VMC_LINK_VERSION 1u
+-#define VMC_LINK_RESULT_TYPE 0x01u
+-#define VMC_LINK_PAYLOAD_LENGTH 27u
++#define BALL_POSITION_PACKET_SIZE 4u
++#define BALL_POSITION_SOF1 0xA5u
++#define BALL_POSITION_SOF2 0x5Au
++#define BALL_POSITION_MIN_MM (-125)
++#define BALL_POSITION_MAX_MM 125
+ 
+ typedef struct {
+-    uint16_t sequence;
+-    uint32_t timestamp_ms;
+-    uint8_t detector_id;
+-    uint8_t state;
+-    uint16_t target_class;
+-    int16_t center_x_px;
+-    int16_t center_y_px;
+-    int16_t error_x_permille;
+-    int16_t error_y_permille;
+-    uint16_t bbox_width_px;
+-    uint16_t bbox_height_px;
+-    uint16_t confidence_permille;
+-    uint16_t distance_mm;
+-    uint8_t flags;
+-} vmc_link_result_t;
++    int8_t x_mm;
++} ball_position_packet_t;
+ 
+ typedef struct {
+-    uint8_t buffer[VMC_LINK_PACKET_SIZE];
++    uint8_t buffer[BALL_POSITION_PACKET_SIZE];
+     uint8_t length;
+     uint32_t good_count;
+     uint32_t crc_error_count;
+-    uint32_t header_error_count;
+-} vmc_link_parser_t;
++} ball_position_parser_t;
+ 
+-void vmc_link_parser_init(vmc_link_parser_t *parser);
+-uint16_t vmc_link_crc16_ccitt_false(const uint8_t *data, size_t length);
+-bool vmc_link_feed_byte(
+-    vmc_link_parser_t *parser,
++void ball_position_parser_init(ball_position_parser_t *parser);
++uint8_t ball_position_crc8_atm(const uint8_t *data, size_t length);
++bool ball_position_feed_byte(
++    ball_position_parser_t *parser,
+     uint8_t byte,
+-    vmc_link_result_t *out
++    ball_position_packet_t *out
+ );
+ 
+ #endif
+diff --git a/tests/test_steel_ball_yolo_ncnn_detector.py b/tests/test_steel_ball_yolo_ncnn_detector.py
+index 47bc2b1..68cc76f 100644
+--- a/tests/test_steel_ball_yolo_ncnn_detector.py
++++ b/tests/test_steel_ball_yolo_ncnn_detector.py
+@@ -17,7 +17,12 @@ from core.config_loader import (
+     load_mission_config,
+     load_steel_ball_ncnn_config,
+ )
+-from core.models import FramePacket, SteelBallNcnnConfig, TargetState
++from core.models import (
++    BallPositionMappingConfig,
++    FramePacket,
++    SteelBallNcnnConfig,
++    TargetState,
++)
+ from detectors.base_detector import BaseDetector
+ from detectors.steel_ball_detector import SteelBallDetector
+ from detectors.steel_ball_yolo_ncnn_detector import (
+@@ -210,7 +215,14 @@ def test_debug_mode_runs_ncnn_and_preview_without_publish(tmp_path: Path) -> Non
+ 
+ 
+ def test_competition_mode_uses_existing_publish_gate(tmp_path: Path) -> None:
+-    detector = _detector(FakeNcnnRuntime([[ _detection() ]]))
++    detector = _detector(
++        FakeNcnnRuntime([[_detection()]]),
++        position_mapping=BallPositionMappingConfig(
++            calibrated=True,
++            x_minus_125_px=0,
++            x_plus_125_px=100,
++        ),
++    )
+     serial = FakeSerial(online=True)
+     runtime = _runtime(
+         tmp_path,
+@@ -222,7 +234,7 @@ def test_competition_mode_uses_existing_publish_gate(tmp_path: Path) -> None:
+     )
+     runtime.run_forever()
+     assert len(serial.published) == 1
+-    assert serial.published[0][1] == "steel_ball_yolo_ncnn"
++    assert serial.published == [-50]
+ 
+ 
+ def test_model_load_failure_keeps_camera_runtime_alive(tmp_path: Path) -> None:
+@@ -331,4 +343,3 @@ def test_ncnn_config_rejects_out_of_range_values(tmp_path: Path, field: str, val
+     path.write_text(yaml.safe_dump(data), encoding="utf-8")
+     with pytest.raises(ConfigError, match=field):
+         load_steel_ball_ncnn_config(path)
+-
+diff --git a/tests/test_vision_runtime_touch.py b/tests/test_vision_runtime_touch.py
+index 74be018..02a6634 100644
+--- a/tests/test_vision_runtime_touch.py
++++ b/tests/test_vision_runtime_touch.py
+@@ -21,7 +21,13 @@ import core.vision_runtime as runtime_module
+ import touch_ui.server as touch_server_module
+ from app import ControlProcessor, _handle_control_messages, _handle_display, _save_debug_frame
+ from core.config_loader import ConfigError, load_camera_config, load_mission_config
+-from core.models import FramePacket, TargetState, VisionResult
++from core.models import (
++    BallPositionMappingConfig,
++    FramePacket,
++    SteelBallNcnnConfig,
++    TargetState,
++    VisionResult,
++)
+ from core.state_machine import VisionMode, VisionStateMachine
+ from core.vision_runtime import RuntimeCommandQueue, VisionRuntime
+ from detectors.target_tracker import TargetTracker
+@@ -38,13 +44,26 @@ PROJECT_CONFIG = Path(__file__).resolve().parents[1] / "config/touch_ui.yaml"
+ class FakeDetector:
+     target_class = 1
+ 
+-    def __init__(self, *, fail_initialize: bool = False, target_class: int = 1) -> None:
++    def __init__(
++        self,
++        *,
++        fail_initialize: bool = False,
++        target_class: int = 1,
++        position_calibrated: bool = False,
++    ) -> None:
+         self.initialize_count = 0
+         self.reset_count = 0
+         self.process_count = 0
+         self.draw_count = 0
+         self.fail_initialize = fail_initialize
+         self.target_class = target_class
++        self.config = SteelBallNcnnConfig(
++            position_mapping=BallPositionMappingConfig(
++                calibrated=position_calibrated,
++                x_minus_125_px=0,
++                x_plus_125_px=20,
++            )
++        )
+ 
+     def initialize(self) -> None:
+         self.initialize_count += 1
+@@ -109,7 +128,7 @@ class FakeSerial:
+         self.start_count = 0
+         self.stop_count = 0
+         self.published = []
+-        self.pending_result = None
++        self.pending_ball_position = None
+         self.discard_count = 0
+ 
+     def start(self) -> None:
+@@ -122,19 +141,23 @@ class FakeSerial:
+         return None
+ 
+     def get_statistics(self):
+-        return {"port_open": self.enabled, "tx_count": len(self.published)}
++        return {
++            "port_open": self.enabled,
++            "tx_count": len(self.published),
++            "position_tx_count": len(self.published),
++        }
+ 
+     def send_packet(self, *_args, **_kwargs):
+         return False
+ 
+-    def publish_result(self, result, detector_id, **_kwargs):
+-        self.published.append((result, detector_id))
+-        self.pending_result = (result, detector_id)
++    def publish_ball_position(self, x_mm):
++        self.published.append(x_mm)
++        self.pending_ball_position = x_mm
+         return True
+ 
+-    def discard_pending_result(self):
++    def discard_pending_ball_position(self):
+         self.discard_count += 1
+-        self.pending_result = None
++        self.pending_ball_position = None
+ 
+ 
+ def _touch_config(tmp_path: Path):
+@@ -257,6 +280,7 @@ def test_startup_competition_mode_requires_explicit_cli_flag(
+     monkeypatch.setattr(app, "run_application", fake_run_application)
+     assert app.main(["--touch-ui", "--detector", "color", "--no-serial", *extra_args]) == 0
+     assert captured["initial_competition_mode"] is expected
++    assert captured["current_detector_name"] == "steel_ball_yolo_ncnn"
+ 
+ 
+ def test_create_camera_source_constructs_only_one_camera_service(monkeypatch) -> None:
+@@ -359,24 +383,23 @@ def test_debug_mode_keeps_detection_and_preview_but_does_not_publish(tmp_path) -
+     assert not status["vision_output_enabled"]
+ 
+ 
+-def test_competition_mode_publishes_digit_result_and_reports_output_enabled(
++def test_competition_mode_publishes_ball_position_and_reports_output_enabled(
+     tmp_path,
+ ) -> None:
+     frame = FramePacket(7, time.monotonic(), np.zeros((30, 40, 3), np.uint8))
+-    detector = FakeDetector(target_class=108)
++    detector = FakeDetector(target_class=100, position_calibrated=True)
+     serial = FakeSerial(online=True)
+     runtime = _runtime(
+         tmp_path,
+         detector=detector,
+         camera=FakeCamera([frame], finished=True),
+         serial=serial,
+-        detector_id="digit",
++        detector_id="steel_ball_yolo_ncnn",
+         initial_competition_mode=True,
+     )
+     assert runtime.run_forever() == 0
+     assert len(serial.published) == 1
+-    result, detector_id = serial.published[0]
+-    assert detector_id == "digit" and 100 <= result.target_class <= 109
++    assert serial.published == [0]
+     assert runtime.get_status_snapshot()["vision_output_enabled"]
+ 
+ 
+@@ -384,7 +407,7 @@ def test_exiting_competition_discards_pending_and_blocks_following_frames(
+     tmp_path,
+ ) -> None:
+     serial = FakeSerial()
+-    serial.pending_result = "old"
++    serial.pending_ball_position = 25
+     runtime = _runtime(
+         tmp_path,
+         camera=FakeCamera(
+@@ -395,7 +418,7 @@ def test_exiting_competition_discards_pending_and_blocks_following_frames(
+         initial_competition_mode=True,
+     )
+     runtime._set_competition(False)
+-    assert serial.pending_result is None and serial.discard_count == 1
++    assert serial.pending_ball_position is None and serial.discard_count == 1
+     runtime.run_forever()
+     assert serial.published == []
+ 
+@@ -404,18 +427,19 @@ def test_entering_competition_discards_old_result_and_only_publishes_new_frame(
+     tmp_path,
+ ) -> None:
+     serial = FakeSerial()
+-    serial.pending_result = "before-competition"
++    serial.pending_ball_position = 50
+     frame = FramePacket(9, time.monotonic(), np.zeros((20, 20, 3), np.uint8))
+     runtime = _runtime(
+         tmp_path,
+         camera=FakeCamera([frame], finished=True),
++        detector=FakeDetector(position_calibrated=True),
+         serial=serial,
+     )
+     runtime._set_competition(True)
+-    assert serial.pending_result is None and serial.discard_count == 1
++    assert serial.pending_ball_position is None and serial.discard_count == 1
+     runtime.run_forever()
+     assert len(serial.published) == 1
+-    assert serial.published[0][0].frame_id == 9
++    assert serial.published == [0]
+ 
+ 
+ def test_detector_switch_failure_keeps_old_detector(tmp_path) -> None:
+diff --git a/tests/test_vision_serial_publisher.py b/tests/test_vision_serial_publisher.py
+index 7794156..d975021 100644
+--- a/tests/test_vision_serial_publisher.py
++++ b/tests/test_vision_serial_publisher.py
+@@ -9,9 +9,8 @@ import pytest
+ 
+ from app import resolve_serial_settings
+ from core.config_loader import ConfigError, load_mission_config
+-from core.models import TargetState, VisionResult
+ from drivers.serial_service import SerialService
+-from protocol.vmc_link import decode_result_packet
++from protocol.ball_position_link import decode_ball_position
+ 
+ 
+ class FakeSerial:
+@@ -55,22 +54,6 @@ class BlockingReadSerial(FakeSerial):
+         super().close()
+ 
+ 
+-def vision(frame_id: int) -> VisionResult:
+-    return VisionResult(
+-        frame_id=frame_id,
+-        capture_timestamp=time.monotonic(),
+-        process_timestamp=time.monotonic(),
+-        found=True,
+-        target_state=TargetState.LOCKED,
+-        target_class=100 + frame_id % 10,
+-        center_x=frame_id,
+-        center_y=20,
+-        image_width=100,
+-        image_height=100,
+-        confidence=900,
+-    )
+-
+-
+ def wait_until(predicate, timeout: float = 1.5) -> None:
+     deadline = time.monotonic() + timeout
+     while time.monotonic() < deadline:
+@@ -80,7 +63,7 @@ def wait_until(predicate, timeout: float = 1.5) -> None:
+     raise AssertionError("等待串口模拟状态超时")
+ 
+ 
+-def test_latest_result_replaces_old_pending_result() -> None:
++def test_latest_position_replaces_old_pending_position() -> None:
+     fake = BlockingReadSerial()
+     service = SerialService(
+         "fake",
+@@ -90,17 +73,17 @@ def test_latest_result_replaces_old_pending_result() -> None:
+     )
+     service.start()
+     assert fake.read_entered.wait(1.0)
+-    for frame_id in range(1, 7):
+-        service.publish_result(vision(frame_id), "digit")
++    for x_mm in range(1, 7):
++        service.publish_ball_position(x_mm)
+     fake.release_read.set()
+     wait_until(lambda: len(fake.written) >= 1)
+     service.stop()
+     assert len(fake.written) == 1
+-    assert decode_result_packet(fake.written[0]).center_x_px == 6
+-    assert service.get_statistics()["result_replacements"] == 5
++    assert decode_ball_position(fake.written[0]).x_mm == 6
++    assert service.get_statistics()["position_replacements"] == 5
+ 
+ 
+-def test_discard_pending_result_is_thread_safe_and_preserves_sequence() -> None:
++def test_discard_pending_position_is_thread_safe() -> None:
+     fake = BlockingReadSerial()
+     service = SerialService(
+         "fake",
+@@ -109,20 +92,17 @@ def test_discard_pending_result_is_thread_safe_and_preserves_sequence() -> None:
+     )
+     service.start()
+     assert fake.read_entered.wait(1.0)
+-    with service._result_lock:
+-        service._result_sequence = 17
+-    assert service.publish_result(vision(3), "digit")
+-    service.discard_pending_result()
+-    assert service.get_statistics()["result_sequence"] == 17
+-    with service._result_lock:
+-        assert service._latest_result is None
++    assert service.publish_ball_position(17)
++    service.discard_pending_ball_position()
++    with service._position_lock:
++        assert service._latest_ball_position is None
+     fake.release_read.set()
+     time.sleep(0.08)
+     service.stop()
+     assert fake.written == []
+ 
+ 
+-def test_result_sequence_wraps_at_uint16() -> None:
++def test_consumed_position_is_not_retransmitted() -> None:
+     fake = FakeSerial()
+     service = SerialService(
+         "fake",
+@@ -131,14 +111,11 @@ def test_result_sequence_wraps_at_uint16() -> None:
+     )
+     service.start()
+     wait_until(lambda: service.get_statistics()["port_open"])
+-    with service._result_lock:
+-        service._result_sequence = 0xFFFF
+-    service.publish_result(vision(1), "color")
++    service.publish_ball_position(-12)
+     wait_until(lambda: len(fake.written) >= 1)
+-    service.publish_result(vision(2), "color")
+-    wait_until(lambda: len(fake.written) >= 2)
++    time.sleep(0.05)
+     service.stop()
+-    assert [decode_result_packet(item).sequence for item in fake.written[:2]] == [0xFFFF, 0]
++    assert [decode_ball_position(item).x_mm for item in fake.written] == [-12]
+ 
+ 
+ def test_open_failure_non_strict_keeps_worker_alive() -> None:
+diff --git a/tools/serial_monitor.py b/tools/serial_monitor.py
+index a02e6e9..e29c27e 100644
+--- a/tools/serial_monitor.py
++++ b/tools/serial_monitor.py
+@@ -1,16 +1,15 @@
+-"""监视或模拟 VMC-Link v1 固定视觉结果流。"""
++"""Monitor or simulate the four-byte steel-ball position stream."""
+ 
+ from __future__ import annotations
+ 
+ import argparse
+ import time
+ 
+-from core.models import TargetState, VisionResult
+-from protocol.vmc_link import DetectorID, VMCLinkParser, VMCLinkResult, encode_result_packet
++from protocol.ball_position_link import BallPositionParser, encode_ball_position
+ 
+ 
+ def build_argument_parser() -> argparse.ArgumentParser:
+-    parser = argparse.ArgumentParser(description="VMC-Link v1 串口监视器")
++    parser = argparse.ArgumentParser(description="钢球4字节位置包串口监视器")
+     parser.add_argument("--port", help="串口设备，例如 /dev/ttyUSB0")
+     parser.add_argument("--baudrate", type=int, default=115200)
+     parser.add_argument("--simulate", action="store_true", help="使用内存模拟，不访问串口")
+@@ -19,69 +18,31 @@ def build_argument_parser() -> argparse.ArgumentParser:
+     return parser
+ 
+ 
+-def _format_packet(packet: VMCLinkResult, hz: float, lost: int) -> str:
+-    return (
+-        f"seq={packet.sequence:5d} detector={packet.detector_id} state={packet.state} "
+-        f"class={packet.target_class} center=({packet.center_x_px},{packet.center_y_px}) "
+-        f"error=({packet.error_x_permille},{packet.error_y_permille})permille "
+-        f"confidence={packet.confidence_permille} distance={packet.distance_mm}mm "
+-        f"flags=0x{packet.flags:02X} CRC=OK rate={hz:.1f}Hz lost={lost}"
+-    )
+-
+-
+ class MonitorStatistics:
+     def __init__(self) -> None:
+         self.started: float | None = None
+         self.count = 0
+-        self.lost = 0
+-        self.last_sequence: int | None = None
+ 
+-    def record(self, packet: VMCLinkResult) -> str:
++    def record(self, x_mm: int) -> str:
+         now = time.monotonic()
+         if self.started is None:
+             self.started = now
+-        if self.last_sequence is not None:
+-            missing = (packet.sequence - self.last_sequence - 1) & 0xFFFF
+-            if missing < 0x8000:
+-                self.lost += missing
+-        self.last_sequence = packet.sequence
+         self.count += 1
+         elapsed = max(now - self.started, 1e-6)
+         frequency = 0.0 if self.count < 2 else (self.count - 1) / elapsed
+-        return _format_packet(packet, frequency, self.lost)
+-
+-
+-def _simulation_packet(sequence: int) -> bytes:
+-    digit = sequence % 10
+-    result = VisionResult(
+-        frame_id=sequence,
+-        capture_timestamp=time.monotonic(),
+-        process_timestamp=time.monotonic(),
+-        found=True,
+-        target_state=TargetState.LOCKED,
+-        target_class=100 + digit,
+-        center_x=320 + digit,
+-        center_y=240,
+-        bbox_width=64,
+-        bbox_height=96,
+-        confidence=900,
+-        image_width=640,
+-        image_height=480,
+-    )
+-    return encode_result_packet(result, sequence, DetectorID.DIGIT)
++        return f"x_mm={x_mm:+d} CRC=OK rate={frequency:.1f}Hz count={self.count}"
+ 
+ 
+ def _run_simulation(rate: float, count: int) -> None:
+     if rate <= 0 or count < 0:
+         raise ValueError("rate 必须为正数且 count 不能为负数")
+-    parser = VMCLinkParser()
++    parser = BallPositionParser()
+     statistics = MonitorStatistics()
+-    sequence = 0
+     generated = 0
+     while count == 0 or generated < count:
+-        for packet in parser.feed(_simulation_packet(sequence)):
+-            print(statistics.record(packet), flush=True)
+-        sequence = (sequence + 1) & 0xFFFF
++        x_mm = -125 + generated % 251
++        for packet in parser.feed(encode_ball_position(x_mm)):
++            print(statistics.record(packet.x_mm), flush=True)
+         generated += 1
+         time.sleep(1.0 / rate)
+ 
+@@ -89,14 +50,14 @@ def _run_simulation(rate: float, count: int) -> None:
+ def _run_serial(port: str, baudrate: int) -> None:
+     import serial
+ 
+-    parser = VMCLinkParser()
++    parser = BallPositionParser()
+     statistics = MonitorStatistics()
+     previous_crc_errors = 0
+     with serial.serial_for_url(port, baudrate, timeout=0.1) as connection:
+         while True:
+             data = connection.read(256)
+             for packet in parser.feed(data):
+-                print(statistics.record(packet), flush=True)
++                print(statistics.record(packet.x_mm), flush=True)
+             if parser.crc_error_count != previous_crc_errors:
+                 print(f"CRC errors={parser.crc_error_count}", flush=True)
+                 previous_crc_errors = parser.crc_error_count
+diff --git a/tools/vmc_link_selftest.py b/tools/vmc_link_selftest.py
+index 8de6c34..ce8c25e 100644
+--- a/tools/vmc_link_selftest.py
++++ b/tools/vmc_link_selftest.py
+@@ -1,87 +1,45 @@
+-"""VMC-Link v1 无硬件自检。"""
++"""Hardware-free self-test for the four-byte steel-ball position link."""
+ 
+ from __future__ import annotations
+ 
+ import sys
+-from dataclasses import dataclass
+ 
+-from protocol.crc16 import crc16_ccitt_false
+-from protocol.vmc_link import (
+-    RESULT_PACKET_SIZE,
+-    DetectorID,
+-    VMCLinkParser,
+-    decode_result_packet,
+-    encode_result_packet,
++from protocol.ball_position_link import (
++    BallPositionParser,
++    decode_ball_position,
++    encode_ball_position,
+ )
+ 
+ 
+-@dataclass
+-class _SampleResult:
+-    capture_timestamp: float = 12.345
+-    found: bool = True
+-    target_state: int = 2
+-    target_class: int = 1
+-    center_x: int = 400
+-    center_y: int = 180
+-    bbox_width: int = 80
+-    bbox_height: int = 60
+-    confidence: int = 875
+-    distance_mm: int = 0xFFFF
+-    image_width: int = 640
+-    image_height: int = 480
+-
+-
+-def _result(state: int, found: bool, target_class: int = 1) -> _SampleResult:
+-    return _SampleResult(found=found, target_state=state, target_class=target_class)
+-
+-
+ def run_selftest() -> None:
+-    assert crc16_ccitt_false(b"123456789") == 0x29B1
+-    encoded: list[bytes] = []
+-    cases = (
+-        (DetectorID.COLOR, 1, True, 1),
+-        (DetectorID.SHAPE, 2, True, 2),
+-        (DetectorID.STEEL_BALL, 4, False, 0),
+-        (DetectorID.DIGIT, 3, False, 108),
+-    )
+-    for sequence, (detector, state, found, target_class) in enumerate(cases):
+-        packet = encode_result_packet(
+-            _result(state, found, target_class),
+-            sequence,
+-            detector,
+-            camera_calibrated=True,
+-        )
+-        assert len(packet) == RESULT_PACKET_SIZE
+-        assert decode_result_packet(packet).sequence == sequence
+-        encoded.append(packet)
+-
+-    parser = VMCLinkParser()
+-    assert parser.feed(b"noise\xAA") == []
+-    first = encoded[0]
+-    assert parser.feed(first[1:12]) == []
+-    parsed = parser.feed(first[12:] + encoded[1] + encoded[2])
+-    assert [item.sequence for item in parsed] == [0, 1, 2]
+-
+-    bad = bytearray(encoded[0])
+-    bad[20] ^= 0x40
+-    parsed = parser.feed(bad + encoded[3])
+-    assert [item.sequence for item in parsed] == [3]
++    vectors = {
++        -125: bytes.fromhex("A5 5A 83 86"),
++        0: bytes.fromhex("A5 5A 00 06"),
++        125: bytes.fromhex("A5 5A 7D 72"),
++    }
++    for x_mm, expected in vectors.items():
++        assert encode_ball_position(x_mm) == expected
++        assert decode_ball_position(expected).x_mm == x_mm
++
++    parser = BallPositionParser()
++    assert parser.feed(b"noise\xAA\x55\xA5") == []
++    parsed = parser.feed(vectors[-125][1:] + vectors[0] + vectors[125])
++    assert [packet.x_mm for packet in parsed] == [-125, 0, 125]
++
++    corrupt = bytearray(vectors[0])
++    corrupt[-1] ^= 0x01
++    parsed = parser.feed(corrupt + encode_ball_position(37))
++    assert [packet.x_mm for packet in parsed] == [37]
+     assert parser.crc_error_count == 1
+ 
+-    wrapped = [
+-        decode_result_packet(encode_result_packet(_result(2, True), seq))
+-        for seq in (0xFFFF, 0x0000)
+-    ]
+-    assert [item.sequence for item in wrapped] == [0xFFFF, 0]
+-
+ 
+ def main() -> int:
+     try:
+         run_selftest()
+     except Exception as exc:
+-        print(f"VMC-Link selftest: FAIL - {exc}", file=sys.stderr)
++        print(f"Ball position link selftest: FAIL - {exc}", file=sys.stderr)
+         return 1
+-    print("VMC-Link selftest: PASS")
++    print("Ball position link selftest: PASS")
+     return 0
+ 
+ 
+diff --git a/touch_ui_web/app.js b/touch_ui_web/app.js
+index b00d6c7..15431e2 100644
+--- a/touch_ui_web/app.js
++++ b/touch_ui_web/app.js
+@@ -15,6 +15,7 @@ let maintenanceStarted = 0;
+ let maintenanceOpenedByHold = false;
+ let confirmResolver = null;
+ let cameraControlsRenderCount = 0;
++let competitionModeEnabled = false;
+ const controlFailures = new Map();
+ const vmcTxTracker = new VmcTxTracker(1500);
+ const controlScheduler = new ControlUpdateScheduler({
+@@ -48,19 +49,6 @@ const CONTROL_GROUPS = [
+   ["曝光", ["exposure_auto", "exposure_absolute", "gain", "backlight_compensation", "power_line_frequency"]],
+   ["白平衡", ["white_balance_automatic", "white_balance_temperature"]],
+ ];
+-const DETECTOR_LABELS = {
+-  color: "颜色识别",
+-  shape: "形状识别",
+-  digit: "数字识别",
+-  steel_ball: "钢球识别（YOLO-NCNN）",
+-  steel_ball_classical: "钢球识别（传统CV）",
+-  steel_ball_yolo_ncnn: "钢球识别（YOLO-NCNN）",
+-};
+-
+-function detectorLabel(name) {
+-  return DETECTOR_LABELS[name] || "—";
+-}
+-
+ async function request(path, options = {}) {
+   const response = await fetch(path, {
+     headers: {"Content-Type": "application/json"},
+@@ -91,6 +79,7 @@ function setTag(id, label, active, warning = false) {
+ }
+ 
+ function renderStatus(status) {
++  competitionModeEnabled = !!status.competition_mode;
+   pollInterval = status.ui?.status_poll_interval_ms || pollInterval;
+   parameterDebounce = status.ui?.parameter_debounce_ms ?? parameterDebounce;
+   controlScheduler.setDebounceMs(parameterDebounce);
+@@ -108,58 +97,43 @@ function renderStatus(status) {
+     "pipelineDrops",
+     `${Number(status.vision_skipped_camera_frames || 0)} / ${Number(status.preview_overwritten_count || 0)}`,
+   );
+-  text("txCount", status.vmc_tx_count || 0);
+-  text("targetClass", status.target_class || "—");
+-  text("detector", detectorLabel(status.detector));
+-  text("confidence", status.confidence || 0);
+-  text("center", `${status.center_x ?? -1}, ${status.center_y ?? -1}`);
+-  text("mode", status.mode || "—");
++  const positionTxCount = Number(status.position_tx_count ?? status.vmc_tx_count ?? 0);
++  text("txCount", positionTxCount);
++  const calibrated = !!status.ball_position_calibrated;
++  const xMillimetres = status.ball_x_mm;
++  const xPixels = status.ball_x_px;
++  text(
++    "ballPosition",
++    !calibrated
++      ? "-- mm"
++      : (xMillimetres === null || xMillimetres === undefined
++        ? "-- mm"
++        : `${Number(xMillimetres) > 0 ? "+" : ""}${Number(xMillimetres)} mm`),
++  );
++  text("ballPixelPosition", `像素 X：${xPixels === null || xPixels === undefined ? "—" : xPixels}`);
++  text("mappingState", calibrated ? "已标定" : "未标定");
+   text("lastError", status.detector_error || status.last_error || "无错误");
+-  text("overlayDetector", detectorLabel(status.detector));
+-  text("overlayTarget", status.target_class || "—");
+-  text("overlayState", status.state || "NONE");
+-  text("cDetector", detectorLabel(status.detector));
+-  text("cClass", status.target_class || "—");
+-  text("cState", status.state || "NONE");
+-  text("cConfidence", status.confidence || 0);
+-  text("cFps", visionFps.toFixed(1));
+-  text("cPipelineFps", `${cameraFps.toFixed(1)} / ${visionFps.toFixed(1)} / ${previewFps.toFixed(1)}`);
+-  text("cPipelineLatency", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
+-  text("cLinks", `${status.camera_online ? "ON" : "OFF"} / ${status.serial_online ? "ON" : "OFF"}`);
+   const steelBallPanel = $("steelBallStatus");
+   if (steelBallPanel) {
+-    const isSteelBall = !!status.steel_ball_backend;
+-    steelBallPanel.hidden = !isSteelBall;
+-    if (isSteelBall) {
+-      text(
+-        "steelBallBackend",
+-        status.steel_ball_backend === "ncnn" ? "YOLO-NCNN" : "传统CV",
+-      );
+-      text(
+-        "steelBallModel",
+-        status.model_loaded
+-          ? "已加载"
+-          : (status.steel_ball_backend === "ncnn" ? "加载失败" : "不适用"),
+-      );
+-      text("steelBallCount", Number(status.detection_count || 0));
+-      text(
+-        "steelBallTiming",
+-        `${Number(status.inference_ms || 0).toFixed(1)} / ${Number(status.inference_median_ms || 0).toFixed(1)} / ${Number(status.inference_p95_ms || 0).toFixed(1)} ms`,
+-      );
+-      text("steelBallE2E", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
+-    }
++    steelBallPanel.hidden = false;
++    text("steelBallBackend", "YOLO-NCNN");
++    text("steelBallModel", status.model_loaded ? "已加载" : "未加载");
++    text(
++      "steelBallTiming",
++      `${Number(status.inference_ms || 0).toFixed(1)} / ${Number(status.inference_median_ms || 0).toFixed(1)} / ${Number(status.inference_p95_ms || 0).toFixed(1)} ms`,
++    );
++    text("steelBallE2E", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
+   }
+   setTag("runningBadge", status.runtime_running ? "RUNNING" : "STOPPED", !!status.runtime_running);
+   setTag("cameraBadge", status.camera_online ? "CAM ONLINE" : "CAM OFFLINE", !!status.camera_online);
+   setTag("serialBadge", status.serial_online ? "UART ONLINE" : "UART OFFLINE", !!status.serial_online);
+-  const vmcState = vmcTxTracker.update(!!status.serial_online, status.vmc_tx_count, Date.now());
++  const vmcState = vmcTxTracker.update(!!status.serial_online, positionTxCount, Date.now());
+   setTag(
+     "vmcBadge",
+-    `VMC TX ${vmcState}`,
++    `位置 TX ${vmcState}`,
+     vmcState === "ACTIVE",
+     vmcState === "IDLE",
+   );
+-  setTag("lockBadge", status.state || "NONE", status.state === "LOCKED", status.state !== "LOCKED");
+   const dirty = !!status.runtime_modified || controlScheduler.hasPending();
+   setTag("dirtyBadge", dirty ? "DIRTY" : "CLEAN", !dirty, dirty);
+   const visionOutputEnabled = !!status.vision_output_enabled;
+@@ -169,18 +143,7 @@ function renderStatus(status) {
+     true,
+     visionOutputEnabled,
+   );
+-  $("normalDock").hidden = !!status.competition_mode;
+-  $("competitionDock").hidden = !status.competition_mode;
+-  document.querySelectorAll("[data-detector]").forEach((button) => {
+-    const legacySteelBallSelected = status.detector === "steel_ball" && (
+-      (status.steel_ball_backend === "ncnn" && button.dataset.detector === "steel_ball_yolo_ncnn")
+-      || (status.steel_ball_backend === "classical" && button.dataset.detector === "steel_ball_classical")
+-    );
+-    button.classList.toggle(
+-      "active",
+-      button.dataset.detector === status.detector || legacySteelBallSelected,
+-    );
+-  });
++  text("enterCompetition", competitionModeEnabled ? "停止位置下发" : "启用位置下发");
+ }
+ 
+ async function pollStatus() {
+@@ -714,13 +677,6 @@ function finishConfirmation(accepted) {
+   confirmResolver = null;
+ }
+ 
+-document.querySelectorAll("[data-detector]").forEach((button) => {
+-  button.addEventListener("click", () => runCommand(
+-    "/api/detector/select",
+-    `切换到${button.textContent}`,
+-    {body: {detector: button.dataset.detector}},
+-  ));
+-});
+ $("showCamera").addEventListener("click", () => setDrawerOpen(true));
+ $("closeCamera").addEventListener("click", () => setDrawerOpen(false));
+ $("drawerHandle").addEventListener("pointerdown", beginDrawerDrag);
+@@ -741,7 +697,10 @@ $("restoreBaseline").addEventListener("click", async () => {
+   await controlScheduler.waitForIdle();
+   await runCommand("/api/runtime/restore-baseline", "恢复基准参数", {refreshCamera: true});
+ });
+-$("enterCompetition").addEventListener("click", () => runCommand("/api/competition/enter", "进入比赛模式"));
++$("enterCompetition").addEventListener("click", () => runCommand(
++  competitionModeEnabled ? "/api/competition/exit" : "/api/competition/enter",
++  competitionModeEnabled ? "停止位置下发" : "启用位置下发",
++));
+ 
+ $("maintenanceButton").addEventListener("pointerdown", beginMaintenanceHold);
+ $("maintenanceButton").addEventListener("pointerup", endMaintenanceHold);
+diff --git a/touch_ui_web/index.html b/touch_ui_web/index.html
+index a7cdc34..1614770 100644
+--- a/touch_ui_web/index.html
++++ b/touch_ui_web/index.html
+@@ -3,7 +3,7 @@
+ <head>
+   <meta charset="utf-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+-  <title>Vision Field Console</title>
++  <title>钢球位置控制台</title>
+   <link rel="stylesheet" href="/style.css?v=5">
+ </head>
+ <body>
+@@ -11,16 +11,13 @@
+     <section id="previewPane" class="preview-pane" aria-label="实时摄像头预览">
+       <img id="preview" src="/api/preview.mjpg" alt="实时标注画面">
+       <div class="preview-overlay">
+-        <span id="overlayDetector">—</span>
+-        <strong id="overlayTarget">—</strong>
+-        <span id="overlayState">NONE</span>
+         <span>摄像头 <b id="cameraFps">0.0</b> / 识别 <b id="fps">0.0</b> / 预览 <b id="previewFps">0.0</b></span>
+       </div>
+     </section>
+ 
+     <aside id="sideDock" class="side-dock">
+       <header class="dock-header">
+-        <div class="dock-title"><span class="eyebrow">RPI VISION</span><h1>现场调试台</h1></div>
++        <div class="dock-title"><span class="eyebrow">STEEL BALL</span><h1>钢球位置</h1></div>
+         <button id="drawerHandle" class="icon-button drawer-handle" aria-label="打开摄像头参数" aria-expanded="false">
+           <span>‹</span>
+         </button>
+@@ -34,66 +31,40 @@
+           <span id="runningBadge" class="status-tag offline">STOPPED</span>
+           <span id="cameraBadge" class="status-tag offline">CAM OFFLINE</span>
+           <span id="serialBadge" class="status-tag offline">UART OFFLINE</span>
+-          <span id="vmcBadge" class="status-tag warning">VMC TX IDLE</span>
+-          <span id="lockBadge" class="status-tag">NONE</span>
++          <span id="vmcBadge" class="status-tag warning">位置 TX IDLE</span>
+           <span id="dirtyBadge" class="status-tag">CLEAN</span>
+           <span id="competitionBadge" class="status-tag">DEBUG</span>
+         </div>
+ 
++        <section class="ball-position-card" aria-label="钢球横向位置">
++          <span>横向位置</span>
++          <strong id="ballPosition">-- mm</strong>
++          <small id="ballPixelPosition">像素 X：—</small>
++        </section>
++
+         <dl class="telemetry-lines">
+-          <div><dt>Detector</dt><dd id="detector">—</dd></div>
+-          <div><dt>Target</dt><dd id="targetClass">—</dd></div>
+-          <div><dt>Confidence</dt><dd id="confidence">0</dd></div>
+-          <div><dt>VMC-Link TX</dt><dd id="txCount">0</dd></div>
+-          <div><dt>Mode</dt><dd id="mode">—</dd></div>
+-          <div><dt>Center</dt><dd id="center">-1, -1</dd></div>
++          <div><dt>位置包发送</dt><dd id="txCount">0</dd></div>
++          <div><dt>位置标定</dt><dd id="mappingState">未标定</dd></div>
+           <div><dt>摄像头 / 识别 / 预览</dt><dd id="pipelineFps">0 / 0 / 0 FPS</dd></div>
+           <div><dt>端到端 当前 / P95</dt><dd id="pipelineLatency">0 / 0 ms</dd></div>
+           <div><dt>跳帧 / 预览覆盖</dt><dd id="pipelineDrops">0 / 0</dd></div>
+         </dl>
+ 
+-        <dl id="steelBallStatus" class="telemetry-lines" hidden>
++        <dl id="steelBallStatus" class="telemetry-lines">
+           <div><dt>钢球识别</dt><dd id="steelBallBackend">—</dd></div>
+           <div><dt>模型</dt><dd id="steelBallModel">—</dd></div>
+-          <div><dt>当前检测</dt><dd><span id="steelBallCount">0</span>个</dd></div>
+           <div><dt>推理 当前 / 中位 / P95</dt><dd id="steelBallTiming">0 / 0 / 0 ms</dd></div>
+           <div><dt>端到端 当前 / P95</dt><dd id="steelBallE2E">0 / 0 ms</dd></div>
+         </dl>
+ 
+         <div id="lastError" class="error-line">无错误</div>
+ 
+-        <section class="dock-section">
+-          <h2>检测器</h2>
+-          <div class="button-grid detector-grid">
+-            <button data-detector="digit">数字</button>
+-            <button data-detector="color">颜色</button>
+-            <button data-detector="shape">形状</button>
+-            <button data-detector="steel_ball_yolo_ncnn">钢球 YOLO</button>
+-            <button data-detector="steel_ball_classical">钢球 CV</button>
+-          </div>
+-        </section>
+-
+         <section class="dock-section compact-actions">
+           <button id="showCamera" class="primary">摄像头参数</button>
+-          <button id="enterCompetition" class="danger">进入比赛模式</button>
++          <button id="enterCompetition" class="danger">启用位置下发</button>
+         </section>
+       </div>
+ 
+-      <div id="competitionDock" class="competition-dock" hidden>
+-        <span class="competition-running">COMPETITION</span>
+-        <dl class="telemetry-lines competition-lines">
+-          <div><dt>Detector</dt><dd id="cDetector">—</dd></div>
+-          <div><dt>Target</dt><dd id="cClass">—</dd></div>
+-          <div><dt>State</dt><dd id="cState">NONE</dd></div>
+-          <div><dt>Confidence</dt><dd id="cConfidence">0</dd></div>
+-          <div><dt>FPS</dt><dd id="cFps">0</dd></div>
+-          <div><dt>摄像头 / 识别 / 预览</dt><dd id="cPipelineFps">0 / 0 / 0</dd></div>
+-          <div><dt>端到端 当前 / P95</dt><dd id="cPipelineLatency">0 / 0 ms</dd></div>
+-          <div><dt>CAM / UART</dt><dd id="cLinks">OFF / OFF</dd></div>
+-        </dl>
+-        <p>长按右上角维护按钮可退出比赛模式、kiosk或视觉服务。</p>
+-      </div>
+-
+       <section id="cameraPanel" class="camera-drawer" aria-hidden="true">
+         <header class="drawer-header">
+           <div><span class="eyebrow">CAMERA PROFILE</span><h2>摄像头参数</h2></div>
+diff --git a/touch_ui_web/style.css b/touch_ui_web/style.css
+index 4fbce8d..64dc752 100644
+--- a/touch_ui_web/style.css
++++ b/touch_ui_web/style.css
+@@ -109,7 +109,7 @@ h2 { font-size: 17px; }
+   background: var(--danger);
+ }
+ 
+-.dock-content, .competition-dock {
++.dock-content {
+   min-height: 0;
+   overflow: hidden;
+   padding: 10px 12px 12px 18px;
+@@ -136,6 +136,20 @@ h2 { font-size: 17px; }
+ .dock-section h2 { margin-bottom: 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+ .button-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+ .compact-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
++.ball-position-card {
++  margin-bottom: 8px;
++  padding: 10px 12px;
++  display: grid;
++  grid-template-columns: minmax(0, 1fr) auto;
++  align-items: baseline;
++  gap: 2px 10px;
++  border: 1px solid #2c6958;
++  border-radius: 12px;
++  background: #102e28;
++}
++.ball-position-card span { color: var(--muted); font-size: 12px; }
++.ball-position-card strong { color: var(--accent); font-size: clamp(28px, 5vw, 48px); white-space: nowrap; }
++.ball-position-card small { grid-column: 1 / -1; color: var(--blue); }
+ 
+ .drawer-handle {
+   width: 48px;
+@@ -200,12 +214,6 @@ h2 { font-size: 17px; }
+ .drawer-footer button { min-width: 0; min-height: 48px; overflow: hidden; padding-inline: 5px; text-overflow: ellipsis; white-space: nowrap; }
+ .operation-result { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--muted); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+ 
+-.competition-dock { display: grid; align-content: center; gap: 14px; text-align: center; }
+-.competition-dock[hidden] { display: none; }
+-.competition-running { color: var(--accent); font-size: clamp(34px, 7vw, 72px); font-weight: 950; }
+-.competition-lines { text-align: left; }
+-.competition-dock p { color: var(--muted); font-size: 12px; }
+-
+ .modal-backdrop {
+   position: fixed;
+   z-index: 30;

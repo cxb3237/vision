@@ -12,13 +12,11 @@ from typing import Any
 
 from protocol.vmc_messages import Flags, MessageType
 from protocol.vmc_protocol import VmcPacket, VmcStreamParser, encode_packet
-from protocol.vmc_link import (
-    DetectorID,
-    VMCLinkResult,
-    encode_result_packet,
-    result_to_vmc_link,
+from protocol.ball_position_link import (
+    BALL_POSITION_PACKET_SIZE,
+    BALL_POSITION_SOF,
+    encode_ball_position,
 )
-from core.models import VisionResult
 
 
 LOG = logging.getLogger(__name__)
@@ -69,11 +67,10 @@ class SerialService:
         self._send_queue: queue.Queue[bytes] = queue.Queue(maxsize=queue_size)
         self._stream_lock = threading.Lock()
         self._latest_stream: bytes | None = None
-        self._result_lock = threading.Lock()
-        self._latest_result: VMCLinkResult | None = None
-        self._result_sequence = 0
+        self._position_lock = threading.Lock()
+        self._latest_ball_position: tuple[int, bytes] | None = None
         self._send_rate_hz = float(send_rate_hz)
-        self._next_result_send = 0.0
+        self._next_ball_position_send = 0.0
         self._parser = VmcStreamParser()
         self._stats_lock = threading.Lock()
         self._reconnects = 0
@@ -83,7 +80,8 @@ class SerialService:
         self._rx_queue_drops = 0
         self._tx_queue_drops = 0
         self._stream_replacements = 0
-        self._result_replacements = 0
+        self._position_replacements = 0
+        self._position_tx_count = 0
         self._last_rx_monotonic: float | None = None
         self._last_valid_packet_monotonic: float | None = None
         self._last_heartbeat_monotonic: float | None = None
@@ -103,10 +101,9 @@ class SerialService:
         self._drain(self._send_queue)
         with self._stream_lock:
             self._latest_stream = None
-        with self._result_lock:
-            self._latest_result = None
-            self._result_sequence = 0
-            self._next_result_send = 0.0
+        with self._position_lock:
+            self._latest_ball_position = None
+            self._next_ball_position_send = 0.0
         self._parser = VmcStreamParser()
         self._startup_event.clear()
         self._startup_error = None
@@ -197,15 +194,16 @@ class SerialService:
         except queue.Empty:
             pass
         now = time.monotonic()
-        with self._result_lock:
-            if self._latest_result is not None and now >= self._next_result_send:
-                result = self._latest_result.with_sequence(self._result_sequence)
-                self._latest_result = None
-                self._result_sequence = (self._result_sequence + 1) & 0xFFFF
-                self._next_result_send = now + 1.0 / self._send_rate_hz
-                data = encode_result_packet(result, sequence=result.sequence)
+        with self._position_lock:
+            if (
+                self._latest_ball_position is not None
+                and now >= self._next_ball_position_send
+            ):
+                x_mm, data = self._latest_ball_position
+                self._latest_ball_position = None
+                self._next_ball_position_send = now + 1.0 / self._send_rate_hz
                 if self.serial_debug:
-                    LOG.info("VMC-Link TX seq=%d %s", result.sequence, data.hex(" "))
+                    LOG.info("Ball position TX x_mm=%+d bytes=%s", x_mm, data.hex(" "))
                 return data
         try:
             return self._send_queue.get_nowait()
@@ -231,6 +229,11 @@ class SerialService:
             sent += 1
             with self._stats_lock:
                 self._tx_packets += 1
+                if (
+                    len(data) == BALL_POSITION_PACKET_SIZE
+                    and data.startswith(BALL_POSITION_SOF)
+                ):
+                    self._position_tx_count += 1
         return sent
 
     def _record_received(self, data: bytes, packets: list[VmcPacket]) -> None:
@@ -349,35 +352,24 @@ class SerialService:
             LOG.warning("串口%s队列已满", "关键" if target_queue is self._critical_queue else "发送")
             return False
 
-    def publish_result(
-        self,
-        result: VisionResult,
-        detector_id: str | int | DetectorID,
-        *,
-        camera_calibrated: bool = False,
-    ) -> bool:
-        """非阻塞提交最新视觉结果；旧的未发送结果会被覆盖。"""
+    def publish_ball_position(self, x_mm: int) -> bool:
+        """非阻塞提交最新钢球位置；旧的未发送位置会被覆盖。"""
 
+        packet = encode_ball_position(x_mm)
         if not self.enabled or not self.is_running() or self._stop_event.is_set():
             return False
-        snapshot = result_to_vmc_link(
-            result,
-            sequence=0,
-            detector_id=detector_id,
-            camera_calibrated=camera_calibrated,
-        )
-        with self._result_lock:
-            if self._latest_result is not None:
+        with self._position_lock:
+            if self._latest_ball_position is not None:
                 with self._stats_lock:
-                    self._result_replacements += 1
-            self._latest_result = snapshot
+                    self._position_replacements += 1
+            self._latest_ball_position = (x_mm, packet)
         return True
 
-    def discard_pending_result(self) -> None:
-        """丢弃尚未发送的固定视觉结果，不影响序号或串口生命周期。"""
+    def discard_pending_ball_position(self) -> None:
+        """丢弃尚未发送的位置，不影响其他队列或串口生命周期。"""
 
-        with self._result_lock:
-            self._latest_result = None
+        with self._position_lock:
+            self._latest_ball_position = None
 
     def raise_if_failed(self) -> None:
         """严格模式下把后台串口错误传播给主循环。"""
@@ -417,8 +409,9 @@ class SerialService:
                 "rx_queue_drops": self._rx_queue_drops,
                 "tx_queue_drops": self._tx_queue_drops,
                 "stream_replacements": self._stream_replacements,
-                "result_replacements": self._result_replacements,
-                "result_sequence": self._result_sequence,
+                "position_tx_count": self._position_tx_count,
+                "position_replacements": self._position_replacements,
+                "vmc_tx_count": self._position_tx_count,
                 "critical_queue_size": self._critical_queue.qsize(),
                 "send_queue_size": self._send_queue.qsize(),
             }

@@ -9,9 +9,8 @@ import pytest
 
 from app import resolve_serial_settings
 from core.config_loader import ConfigError, load_mission_config
-from core.models import TargetState, VisionResult
 from drivers.serial_service import SerialService
-from protocol.vmc_link import decode_result_packet
+from protocol.ball_position_link import decode_ball_position
 
 
 class FakeSerial:
@@ -55,22 +54,6 @@ class BlockingReadSerial(FakeSerial):
         super().close()
 
 
-def vision(frame_id: int) -> VisionResult:
-    return VisionResult(
-        frame_id=frame_id,
-        capture_timestamp=time.monotonic(),
-        process_timestamp=time.monotonic(),
-        found=True,
-        target_state=TargetState.LOCKED,
-        target_class=100 + frame_id % 10,
-        center_x=frame_id,
-        center_y=20,
-        image_width=100,
-        image_height=100,
-        confidence=900,
-    )
-
-
 def wait_until(predicate, timeout: float = 1.5) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -80,7 +63,7 @@ def wait_until(predicate, timeout: float = 1.5) -> None:
     raise AssertionError("等待串口模拟状态超时")
 
 
-def test_latest_result_replaces_old_pending_result() -> None:
+def test_latest_position_replaces_old_pending_position() -> None:
     fake = BlockingReadSerial()
     service = SerialService(
         "fake",
@@ -90,17 +73,17 @@ def test_latest_result_replaces_old_pending_result() -> None:
     )
     service.start()
     assert fake.read_entered.wait(1.0)
-    for frame_id in range(1, 7):
-        service.publish_result(vision(frame_id), "digit")
+    for x_mm in range(1, 7):
+        service.publish_ball_position(x_mm)
     fake.release_read.set()
     wait_until(lambda: len(fake.written) >= 1)
     service.stop()
     assert len(fake.written) == 1
-    assert decode_result_packet(fake.written[0]).center_x_px == 6
-    assert service.get_statistics()["result_replacements"] == 5
+    assert decode_ball_position(fake.written[0]).x_mm == 6
+    assert service.get_statistics()["position_replacements"] == 5
 
 
-def test_discard_pending_result_is_thread_safe_and_preserves_sequence() -> None:
+def test_discard_pending_position_is_thread_safe() -> None:
     fake = BlockingReadSerial()
     service = SerialService(
         "fake",
@@ -109,20 +92,17 @@ def test_discard_pending_result_is_thread_safe_and_preserves_sequence() -> None:
     )
     service.start()
     assert fake.read_entered.wait(1.0)
-    with service._result_lock:
-        service._result_sequence = 17
-    assert service.publish_result(vision(3), "digit")
-    service.discard_pending_result()
-    assert service.get_statistics()["result_sequence"] == 17
-    with service._result_lock:
-        assert service._latest_result is None
+    assert service.publish_ball_position(17)
+    service.discard_pending_ball_position()
+    with service._position_lock:
+        assert service._latest_ball_position is None
     fake.release_read.set()
     time.sleep(0.08)
     service.stop()
     assert fake.written == []
 
 
-def test_result_sequence_wraps_at_uint16() -> None:
+def test_consumed_position_is_not_retransmitted() -> None:
     fake = FakeSerial()
     service = SerialService(
         "fake",
@@ -131,14 +111,11 @@ def test_result_sequence_wraps_at_uint16() -> None:
     )
     service.start()
     wait_until(lambda: service.get_statistics()["port_open"])
-    with service._result_lock:
-        service._result_sequence = 0xFFFF
-    service.publish_result(vision(1), "color")
+    service.publish_ball_position(-12)
     wait_until(lambda: len(fake.written) >= 1)
-    service.publish_result(vision(2), "color")
-    wait_until(lambda: len(fake.written) >= 2)
+    time.sleep(0.05)
     service.stop()
-    assert [decode_result_packet(item).sequence for item in fake.written[:2]] == [0xFFFF, 0]
+    assert [decode_ball_position(item).x_mm for item in fake.written] == [-12]
 
 
 def test_open_failure_non_strict_keeps_worker_alive() -> None:

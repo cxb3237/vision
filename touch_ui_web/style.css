@@ -109,7 +109,7 @@ h2 { font-size: 17px; }
   background: var(--danger);
 }
 
-.dock-content, .competition-dock {
+.dock-content {
   min-height: 0;
   overflow: hidden;
   padding: 10px 12px 12px 18px;
@@ -136,6 +136,20 @@ h2 { font-size: 17px; }
 .dock-section h2 { margin-bottom: 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; }
 .button-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .compact-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.ball-position-card {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 10px;
+  border: 1px solid #2c6958;
+  border-radius: 12px;
+  background: #102e28;
+}
+.ball-position-card span { color: var(--muted); font-size: 12px; }
+.ball-position-card strong { color: var(--accent); font-size: clamp(28px, 5vw, 48px); white-space: nowrap; }
+.ball-position-card small { grid-column: 1 / -1; color: var(--blue); }
 
 .drawer-handle {
   width: 48px;
@@ -199,12 +213,6 @@ h2 { font-size: 17px; }
 .drawer-footer { width: 100%; min-width: 0; overflow: hidden; padding: 6px 8px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; border-top: 1px solid var(--line); background: #101c22; }
 .drawer-footer button { min-width: 0; min-height: 48px; overflow: hidden; padding-inline: 5px; text-overflow: ellipsis; white-space: nowrap; }
 .operation-result { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--muted); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-
-.competition-dock { display: grid; align-content: center; gap: 14px; text-align: center; }
-.competition-dock[hidden] { display: none; }
-.competition-running { color: var(--accent); font-size: clamp(34px, 7vw, 72px); font-weight: 950; }
-.competition-lines { text-align: left; }
-.competition-dock p { color: var(--muted); font-size: 12px; }
 
 .modal-backdrop {
   position: fixed;

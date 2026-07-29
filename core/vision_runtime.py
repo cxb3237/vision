@@ -12,8 +12,9 @@ from typing import Any, Callable
 
 import cv2
 
+from core.ball_position_mapping import pixel_x_to_mm
 from core.fault_manager import Fault, FaultManager
-from core.models import CameraConfig, VisionResult
+from core.models import BallPositionMappingConfig, CameraConfig, VisionResult
 from core.performance_metrics import RollingRate, RollingSamples
 from core.state_machine import VisionMode
 from detectors.digit_detector import DigitDetector
@@ -153,6 +154,14 @@ class VisionRuntime:
                 "camera_online": False,
                 "serial_online": False,
                 "vmc_tx_count": 0,
+                "position_tx_count": 0,
+                "ball_x_px": None,
+                "ball_x_mm": None,
+                "ball_position_calibrated": self._position_calibrated(),
+                "mcu_ready": False,
+                "uart_state": "串口未打开",
+                "mcu_status": {},
+                "last_uart_error": "",
                 "mode": control_processor.state_machine.mode.name,
                 "runtime_modified": False,
                 "competition_mode": bool(initial_competition_mode),
@@ -271,6 +280,12 @@ class VisionRuntime:
                 self._camera_started = True
                 self.serial_service.start()
                 self._serial_started = bool(self.serial_service.enabled)
+                if (
+                    self._serial_started
+                    and self.state_store.snapshot().get("competition_mode", False)
+                    and hasattr(self.serial_service, "send_start")
+                ):
+                    self.serial_service.send_start()
                 if self.touch_config is not None:
                     self.frame_stream.start()
                     self._preview_started = True
@@ -449,8 +464,34 @@ class VisionRuntime:
             old.reset()
         if hasattr(old, "close"):
             old.close()
-        self.state_store.update(detector=name, last_error="", **self._detector_status())
+        self.state_store.update(
+            detector=name,
+            last_error="",
+            ball_position_calibrated=self._position_calibrated(),
+            **self._detector_status(),
+        )
         LOG.info("检测器已切换: %s", name)
+
+    def _position_mapping(self) -> BallPositionMappingConfig:
+        mapping = getattr(getattr(self.detector, "config", None), "position_mapping", None)
+        if isinstance(mapping, BallPositionMappingConfig):
+            return mapping
+        return BallPositionMappingConfig()
+
+    def _position_calibrated(self) -> bool:
+        if hasattr(self.serial_service, "pixel_x_to_mm"):
+            return True
+        return self._position_mapping().calibrated
+
+    def _ball_position(
+        self, result: VisionResult | None
+    ) -> tuple[int | None, int | None]:
+        if result is None or not result.found or result.center_x < 0:
+            return None, None
+        x_px = int(result.center_x)
+        if hasattr(self.serial_service, "pixel_x_to_mm"):
+            return x_px, int(self.serial_service.pixel_x_to_mm(x_px))
+        return x_px, pixel_x_to_mm(x_px, self._position_mapping())
 
     def _reset_vision_measurement_window(self) -> None:
         """Reset recent-rate/latency windows without erasing cumulative counters."""
@@ -534,7 +575,9 @@ class VisionRuntime:
 
     def _set_competition(self, enabled: bool) -> None:
         if enabled:
-            self.serial_service.discard_pending_result()
+            self.serial_service.discard_pending_ball_position()
+            if hasattr(self.serial_service, "send_start"):
+                self.serial_service.send_start()
             self.state_store.update(
                 competition_mode=True,
                 vision_output_enabled=True,
@@ -545,7 +588,9 @@ class VisionRuntime:
                 competition_mode=False,
                 vision_output_enabled=False,
             )
-            self.serial_service.discard_pending_result()
+            self.serial_service.discard_pending_ball_position()
+            if hasattr(self.serial_service, "send_stop"):
+                self.serial_service.send_stop()
             LOG.info("比赛模式视觉输出已禁用。")
         if self.persistence is not None:
             self.persistence.save_ui_state(enabled, self.current_detector_name)
@@ -767,6 +812,13 @@ class VisionRuntime:
                 "preview_pending": False,
             }
         )
+        ball_x_px, ball_x_mm = self._ball_position(result)
+        position_tx_count = int(
+            serial_stats.get(
+                "position_tx_count", serial_stats.get("vmc_tx_count", 0)
+            )
+            or 0
+        )
         self.state_store.update(
             target_class=int(result.target_class) if found and result else 0,
             state=state_names.get(target_state, "NONE"),
@@ -795,7 +847,15 @@ class VisionRuntime:
             camera_reconnects=int(camera_stats.get("reconnects", 0) or 0),
             camera_online=camera_online,
             serial_online=serial_online,
-            vmc_tx_count=int(serial_stats.get("tx_count", 0)),
+            position_tx_count=position_tx_count,
+            vmc_tx_count=position_tx_count,
+            ball_x_px=ball_x_px,
+            ball_x_mm=ball_x_mm,
+            ball_position_calibrated=self._position_calibrated(),
+            mcu_ready=bool(serial_stats.get("mcu_ready", False)),
+            uart_state=str(serial_stats.get("uart_state", "串口未打开")),
+            mcu_status=dict(serial_stats.get("mcu_status", {}) or {}),
+            last_uart_error=str(serial_stats.get("last_uart_error", "") or ""),
             mode=self.control_processor.state_machine.mode.name,
             vision_output_enabled=bool(
                 self.state_store.snapshot().get("competition_mode", False)
@@ -833,7 +893,7 @@ class VisionRuntime:
         last_frame_seen = started
         last_frame_id: int | None = None
         service_sequence = 0
-        hybrid_v10 = self.mission["serial_protocol_mode"] == "hybrid_v10"
+        hybrid_v10 = self.mission.get("serial_protocol_mode", "hybrid_v10") == "hybrid_v10"
         processed = 0
         process_time_total = 0.0
         display = (bool(getattr(self.args, "display", False)) or bool(self.mission["display"])) and not bool(
@@ -929,15 +989,19 @@ class VisionRuntime:
                         self.state_store.update(last_error=str(exc))
                         LOG.exception("检测器处理失败")
                     process_time_total += time.monotonic() - process_start
-                    if (
-                        result is not None
-                        and self.state_store.snapshot().get("competition_mode", False)
-                    ):
-                        self.serial_service.publish_result(
-                            result,
-                            self.detector_id,
-                            camera_calibrated=self.camera_calibrated,
-                        )
+                _ball_x_px, ball_x_mm = self._ball_position(result)
+                if (
+                    ball_x_mm is not None
+                    and self.state_store.snapshot().get("competition_mode", False)
+                ):
+                    self.serial_service.publish_ball_position(ball_x_mm)
+                elif self.state_store.snapshot().get("competition_mode", False):
+                    if hasattr(self.serial_service, "send_invalid"):
+                        self.serial_service.send_invalid()
+                    else:
+                        self.serial_service.discard_pending_ball_position()
+                else:
+                    self.serial_service.discard_pending_ball_position()
 
                 annotated = None
                 if self.touch_config is not None:

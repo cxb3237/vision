@@ -21,7 +21,13 @@ import core.vision_runtime as runtime_module
 import touch_ui.server as touch_server_module
 from app import ControlProcessor, _handle_control_messages, _handle_display, _save_debug_frame
 from core.config_loader import ConfigError, load_camera_config, load_mission_config
-from core.models import FramePacket, TargetState, VisionResult
+from core.models import (
+    BallPositionMappingConfig,
+    FramePacket,
+    SteelBallNcnnConfig,
+    TargetState,
+    VisionResult,
+)
 from core.state_machine import VisionMode, VisionStateMachine
 from core.vision_runtime import RuntimeCommandQueue, VisionRuntime
 from detectors.target_tracker import TargetTracker
@@ -38,13 +44,26 @@ PROJECT_CONFIG = Path(__file__).resolve().parents[1] / "config/touch_ui.yaml"
 class FakeDetector:
     target_class = 1
 
-    def __init__(self, *, fail_initialize: bool = False, target_class: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        fail_initialize: bool = False,
+        target_class: int = 1,
+        position_calibrated: bool = False,
+    ) -> None:
         self.initialize_count = 0
         self.reset_count = 0
         self.process_count = 0
         self.draw_count = 0
         self.fail_initialize = fail_initialize
         self.target_class = target_class
+        self.config = SteelBallNcnnConfig(
+            position_mapping=BallPositionMappingConfig(
+                calibrated=position_calibrated,
+                x_minus_125_px=0,
+                x_plus_125_px=20,
+            )
+        )
 
     def initialize(self) -> None:
         self.initialize_count += 1
@@ -109,7 +128,7 @@ class FakeSerial:
         self.start_count = 0
         self.stop_count = 0
         self.published = []
-        self.pending_result = None
+        self.pending_ball_position = None
         self.discard_count = 0
 
     def start(self) -> None:
@@ -122,19 +141,23 @@ class FakeSerial:
         return None
 
     def get_statistics(self):
-        return {"port_open": self.enabled, "tx_count": len(self.published)}
+        return {
+            "port_open": self.enabled,
+            "tx_count": len(self.published),
+            "position_tx_count": len(self.published),
+        }
 
     def send_packet(self, *_args, **_kwargs):
         return False
 
-    def publish_result(self, result, detector_id, **_kwargs):
-        self.published.append((result, detector_id))
-        self.pending_result = (result, detector_id)
+    def publish_ball_position(self, x_mm):
+        self.published.append(x_mm)
+        self.pending_ball_position = x_mm
         return True
 
-    def discard_pending_result(self):
+    def discard_pending_ball_position(self):
         self.discard_count += 1
-        self.pending_result = None
+        self.pending_ball_position = None
 
 
 def _touch_config(tmp_path: Path):
@@ -243,7 +266,7 @@ def test_startup_competition_mode_requires_explicit_cli_flag(
     )
     monkeypatch.setattr(app, "create_detector", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(app, "create_camera_source", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(app, "SerialService", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(app, "BallUartClient", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
         app,
         "load_calibration_config",
@@ -257,6 +280,7 @@ def test_startup_competition_mode_requires_explicit_cli_flag(
     monkeypatch.setattr(app, "run_application", fake_run_application)
     assert app.main(["--touch-ui", "--detector", "color", "--no-serial", *extra_args]) == 0
     assert captured["initial_competition_mode"] is expected
+    assert captured["current_detector_name"] == "steel_ball_yolo_ncnn"
 
 
 def test_create_camera_source_constructs_only_one_camera_service(monkeypatch) -> None:
@@ -359,24 +383,23 @@ def test_debug_mode_keeps_detection_and_preview_but_does_not_publish(tmp_path) -
     assert not status["vision_output_enabled"]
 
 
-def test_competition_mode_publishes_digit_result_and_reports_output_enabled(
+def test_competition_mode_publishes_ball_position_and_reports_output_enabled(
     tmp_path,
 ) -> None:
     frame = FramePacket(7, time.monotonic(), np.zeros((30, 40, 3), np.uint8))
-    detector = FakeDetector(target_class=108)
+    detector = FakeDetector(target_class=100, position_calibrated=True)
     serial = FakeSerial(online=True)
     runtime = _runtime(
         tmp_path,
         detector=detector,
         camera=FakeCamera([frame], finished=True),
         serial=serial,
-        detector_id="digit",
+        detector_id="steel_ball_yolo_ncnn",
         initial_competition_mode=True,
     )
     assert runtime.run_forever() == 0
     assert len(serial.published) == 1
-    result, detector_id = serial.published[0]
-    assert detector_id == "digit" and 100 <= result.target_class <= 109
+    assert serial.published == [0]
     assert runtime.get_status_snapshot()["vision_output_enabled"]
 
 
@@ -384,7 +407,7 @@ def test_exiting_competition_discards_pending_and_blocks_following_frames(
     tmp_path,
 ) -> None:
     serial = FakeSerial()
-    serial.pending_result = "old"
+    serial.pending_ball_position = 25
     runtime = _runtime(
         tmp_path,
         camera=FakeCamera(
@@ -395,7 +418,7 @@ def test_exiting_competition_discards_pending_and_blocks_following_frames(
         initial_competition_mode=True,
     )
     runtime._set_competition(False)
-    assert serial.pending_result is None and serial.discard_count == 1
+    assert serial.pending_ball_position is None and serial.discard_count == 1
     runtime.run_forever()
     assert serial.published == []
 
@@ -404,18 +427,19 @@ def test_entering_competition_discards_old_result_and_only_publishes_new_frame(
     tmp_path,
 ) -> None:
     serial = FakeSerial()
-    serial.pending_result = "before-competition"
+    serial.pending_ball_position = 50
     frame = FramePacket(9, time.monotonic(), np.zeros((20, 20, 3), np.uint8))
     runtime = _runtime(
         tmp_path,
         camera=FakeCamera([frame], finished=True),
+        detector=FakeDetector(position_calibrated=True),
         serial=serial,
     )
     runtime._set_competition(True)
-    assert serial.pending_result is None and serial.discard_count == 1
+    assert serial.pending_ball_position is None and serial.discard_count == 1
     runtime.run_forever()
     assert len(serial.published) == 1
-    assert serial.published[0][0].frame_id == 9
+    assert serial.published == [0]
 
 
 def test_detector_switch_failure_keeps_old_detector(tmp_path) -> None:

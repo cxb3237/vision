@@ -2,7 +2,8 @@
 
 本工程面向 Raspberry Pi 4B 和普通 Windows/Linux 开发机，使用 USB UVC 摄像头完成
 HSV 颜色检测、传统几何形状检测、单个印刷数字识别、直径 10 mm 钢球检测、目标时序跟踪、标定、录像和离线回放。可选的
-VMC-Link V1.0 串口链路向 MSPM0G3507 发送视觉结果；MSPM0 始终拥有电机闭环和最终控制权。
+ASCII钢球UART链路向 MSPM0G3507 发送横向毫米位置；历史VMC代码仅保留用于离线兼容，
+MSPM0 始终拥有电机闭环和最终控制权。
 
 当前不包含云台/GPIO 控制、云平台、神经网络数字识别或单目测距。`RECOGNIZE`、`MEASURE`、
 `AIM` 和 `RETURN_CENTER` 控制请求会返回 `UNSUPPORTED`。`CALIBRATION` 是不发送普通
@@ -114,8 +115,8 @@ python3 -m tools.digit_tuner \
 ```bash
 python3 app.py \
   --mode track \
-  --detector digit \
-  --digit-config config/digit.yaml \
+  --detector steel_ball_yolo_ncnn \
+  --steel-ball-ncnn-config config/steel_ball_ncnn.yaml \
   --no-serial \
   --display
 ```
@@ -313,65 +314,55 @@ OpenCV 属性编号 14 是 `CAP_PROP_GAIN`。部分 UVC 摄像头不支持手动
 或 `--serial-port` 才会启用。端口打开只表示 `port_open`，程序依据最近收到的有效对端包判断
 `peer_alive` 和 `SERIAL_LINK_DOWN`。
 
-串口发送将 ACK/URGENT 放入关键队列，普通消息批量发送；VMC-Link v1固定结果通道只保留最新
-一帧，并由串口线程按默认20Hz发送，因此摄像头和检测主循环不会等待串口写操作。固定视觉结果
-仅在比赛模式下发布；调试模式仍运行检测和网页预览，但不会向MSPM0发送34字节视觉结果包。
-`VISION_CONTROL` 只有带 `ACK_REQ` 时才要求回复。重复的 `SEQ + request_id` 返回缓存结果，不会
-再次切换模式或重置 Tracker。
+实际运行链路使用独立的`BallUartClient`和MSPM0既定ASCII协议。视觉线程只覆盖最新位置槽，
+UART工作线程异步收发，默认最高50 Hz；`BALL START/STOP/PING/STATUS`使用高优先级控制队列。
+旧34字节和4字节二进制模块只为历史离线测试保留，`app.py`不会实例化它们。
 
-## VMC-Link v1 固定视觉结果协议
+## MSPM0钢球ASCII UART协议
 
-树莓派向MSPM0发送的视觉结果固定为34字节。所有多字节整数均为小端；CRC使用
-CRC-16/CCITT-FALSE（多项式`0x1021`、初值`0xFFFF`、xorout `0x0000`），计算范围为偏移2的
-`version`至偏移31的`flags`，不包括帧头和CRC字段。
+所有树莓派命令均为ASCII并以`\r\n`结束：
 
-| 偏移 | 长度 | 类型 | 字段 | 约定 |
-| ---: | ---: | --- | --- | --- |
-| 0 | 1 | uint8 | SOF1 | `0xAA` |
-| 1 | 1 | uint8 | SOF2 | `0x55` |
-| 2 | 1 | uint8 | version | `1` |
-| 3 | 1 | uint8 | msg_type | `0x01` |
-| 4 | 1 | uint8 | payload_length | `27` |
-| 5 | 2 | uint16 | sequence | 每个实际发送包加1，`65535→0` |
-| 7 | 4 | uint32 | timestamp_ms | 采集时间毫秒 |
-| 11 | 1 | uint8 | detector_id | none/color/shape/steel_ball/digit=`0/1/2/3/4` |
-| 12 | 1 | uint8 | state | NONE/CANDIDATE/LOCKED/OCCLUDED/LOST=`0/1/2/3/4` |
-| 13 | 2 | uint16 | target_class | 沿用检测器类别；数字为`100～109` |
-| 15 | 2 | int16 | center_x_px | 无目标为`-1` |
-| 17 | 2 | int16 | center_y_px | 无目标为`-1` |
-| 19 | 2 | int16 | error_x_permille | 相对画面中心，裁剪至`-1000～1000` |
-| 21 | 2 | int16 | error_y_permille | 下正上负，裁剪至`-1000～1000` |
-| 23 | 2 | uint16 | bbox_width_px | 无目标为`0` |
-| 25 | 2 | uint16 | bbox_height_px | 无目标为`0` |
-| 27 | 2 | uint16 | confidence_permille | `0～1000` |
-| 29 | 2 | uint16 | distance_mm | 未知为`65535` |
-| 31 | 1 | uint8 | flags | bit0发现、bit1锁定、bit2距离有效、bit3已标定 |
-| 32 | 2 | uint16 | crc16 | 小端CRC |
+```text
+BALL START
+BALL POS 35
+BALL INVALID
+BALL STATUS
+BALL PING
+BALL STOP
+```
 
-项目内部`TargetState`的枚举顺序保持不变，编码层会显式转换为上述线上状态。未发现目标时仍会
-发送对应的NONE、OCCLUDED或LOST状态，同时清零类别、bbox、置信度和误差。
+只有进入位置下发模式后才发送START和连续POS/INVALID；退出模式或程序关闭时尽最大可能发送STOP。
+接收线程严格识别`READY BALL UART2 9600`，并异步解析OK、ERR和`BALL S=...`状态回复，不会阻塞
+摄像头或检测线程。
 
 `config/mission.yaml`中的串口相关配置为：
 
 ```yaml
-serial_enabled: false
-serial_port: /dev/serial0
-serial_baudrate: 115200
-serial_send_rate_hz: 20
-serial_reconnect_interval_s: 1.0
-serial_queue_size: 64
-serial_strict: false
+ball_uart:
+  enabled: true
+  port: /dev/ttyAMA0
+  baudrate: 9600
+  timeout_s: 0.02
+  write_timeout_s: 0.05
+  reconnect_interval_s: 1.0
+  send_rate_hz: 50
+  line_ending: "\r\n"
+  wait_ready: true
+  ping_interval_s: 1.0
+  status_interval_s: 1.0
+  left_endpoint_px: 72
+  right_endpoint_px: 568
+  servo_side: right
 ```
 
-`serial_queue_size`只用于双向控制、ACK和普通消息的收发队列。固定视觉结果不进入这些FIFO；
-它始终通过`_latest_result`单槽只保存最新一帧，因此即使MSPM0暂时读取变慢，也不会积压旧结果
-或拖慢检测线程。
+`left_endpoint_px`和`right_endpoint_px`必须按现场管道端点标定；舵机在画面左侧时把
+`servo_side`设为`left`。端点相同或字段非法会明确拒绝启动，不会回退到二进制协议。
 
 实时发送示例：
 
 ```bash
-python3 app.py --mode track --detector color --target red \
-  --serial-port /dev/ttyUSB0 --baudrate 115200 --serial-rate 20
+python3 app.py --mode track --detector steel_ball_yolo_ncnn \
+  --serial-port /dev/ttyAMA0 --baudrate 9600 --serial-rate 50 --touch-ui --headless
 ```
 
 ### 串口连接与调试
@@ -381,30 +372,31 @@ USB转串口适配器通常显示为`/dev/ttyUSB0`或`/dev/ttyACM0`；可用`ls 
 （GPIO15/RXD）连接MSPM0 TX，物理引脚6连接GND。TX/RX必须交叉、两板必须共地，并且只能使用
 3.3V逻辑电平。可通过`sudo raspi-config`启用UART并关闭串口登录控制台。
 
-协议自检和监视命令：
+独立硬件测试命令：
 
 ```bash
-python3 -m tools.vmc_link_selftest
-python3 -m tools.serial_monitor --simulate
-python3 -m tools.serial_monitor --port /dev/ttyUSB0 --baudrate 115200
+python3 -m tools.test_ball_uart --port /dev/ttyAMA0 ping
+python3 -m tools.test_ball_uart --port /dev/ttyAMA0 status
+python3 -m tools.test_ball_uart --port /dev/ttyAMA0 start
+python3 -m tools.test_ball_uart --port /dev/ttyAMA0 pos 35
+python3 -m tools.test_ball_uart --port /dev/ttyAMA0 invalid
+python3 -m tools.test_ball_uart --port /dev/ttyAMA0 stop
+python3 -m tools.test_ball_uart --port /dev/ttyAMA0 monitor
 ```
 
-MSPM0端可直接移植`mcu_reference/vmc_link.c`和`vmc_link.h`。该解析器无动态内存，适合在UART
-接收中断中逐字节调用，或在DMA回调中遍历新增字节；接线与调用示例见
-`mcu_reference/README.md`。
+本轮不修改MSPM0工程或MCU协议；MCU必须使用已经约定的UART2 ASCII固件。
 
 常见问题：
 
 - 权限不足：执行`sudo usermod -aG dialout $USER`后重新登录，不要长期用root绕过权限。
 - 设备名变化：优先使用`/dev/serial/by-id/`链接，或配置udev固定名称。
-- CRC错误或乱码：确认两端都是115200、8-N-1，且没有把文本日志写入同一UART。
+- 乱码：确认两端都是9600、8-N-1、ASCII加CRLF，且没有把其他日志写入同一UART。
 - 持续收不到包：确认TX/RX已经交叉、两端共地、UART已启用且使用3.3V电平。
 - 偶发断开：查看供电和USB线，服务会按`serial_reconnect_interval_s`自动重连。
 
 ## 兼容的双向控制负载
 
-工程原有的可变长控制帧接口继续保留，用于心跳、ACK和`VISION_CONTROL`，不会影响固定34字节
-视觉结果编码器和解析器：
+工程原有二进制协议代码仅用于历史离线测试；当前`ball_ascii`运行模式不会发送这些帧：
 
 | 负载 | 格式 | 字节数 |
 | --- | --- | ---: |
@@ -454,8 +446,8 @@ python3 app.py \
   --detector digit \
   --digit-config config/digit.yaml \
   --serial-port /dev/ttyAMA0 \
-  --baudrate 115200 \
-  --serial-rate 20 \
+  --baudrate 9600 \
+  --serial-rate 50 \
   --touch-ui \
   --headless
 ```
@@ -466,9 +458,10 @@ python3 app.py \
 
 ### 页面和现场参数
 
-主页显示标注预览、检测器、类别、状态、置信度、中心和误差、FPS、摄像头/串口状态及VMC发送
-计数。切换数字、颜色、形状或钢球检测器只替换运行时检测器，不会重启摄像头和串口；新检测器
-初始化失败时保留旧检测器。
+触摸主页固定使用钢球YOLO-NCNN，显示标注预览、醒目的毫米横向位置、FPS、模型加载和推理耗时、
+摄像头/串口状态及位置包发送计数。正位置显示`+`，没有目标或未标定时显示`-- mm`。网页不再
+提供数字、颜色、形状或传统CV检测器入口；这些后端源码和后端检测器工厂仍保留。历史
+`runtime/touch_ui_state.yaml`中的检测器选择不会覆盖触摸模式的固定选择。
 
 摄像头参数页根据`v4l2-ctl --list-ctrls-menus`实际结果，只显示当前摄像头支持且可写的控制项；
 不支持、只读、当前不可写、范围无效或缺少枚举选项的控制不会占用小屏幕空间。主面板使用中文
@@ -492,8 +485,8 @@ python3 app.py \
 `GET /api/config/camera`并完整重建滑动条状态；`requested`、`actual`、范围、步进、支持状态和
 `MISMATCH`不会沿用恢复前的浏览器本地对象。命令进入`FAILED`时保留当前界面值并显示后端错误。
 
-比赛模式隐藏全部参数控件并由后端拒绝普通修改请求，摄像头、检测、UART和Web服务继续运行。
-只有比赛模式会持续向MSPM0发送固定视觉结果；退出比赛模式会立即清除尚未发送的旧结果，调试
+位置下发启用后，后台继续使用原比赛模式状态机锁定现场参数；摄像头、检测、UART和Web服务继续运行。
+只有启用位置下发且目标有效时才向MSPM0发送ASCII位置；无目标发送`BALL INVALID`，退出会立即停止位置并发送STOP，调试
 模式只保留网页识别预览。程序每次启动默认进入调试模式，只有本次命令行明确给出
 `--competition-mode`才直接启用视觉输出，保存的UI状态不会跨重启恢复该开关。触摸屏需
 长按右上角维护按钮约2秒才能打开维护菜单，比赛模式下入口仍保留。退出比赛模式、退出kiosk和
@@ -533,15 +526,8 @@ PID文件，验证当前用户、浏览器名称、`--kiosk`参数以及项目�
 退出码为0。systemd使用`Restart=on-failure`：崩溃会重启，UI正常停止不会立即重启，系统下次
 开机仍会因服务已enable而启动。
 
-systemd模板不写死检测器。启动检测器按“命令行明确值 > `runtime/touch_ui_state.yaml`保存值 >
-`config/touch_ui.yaml`的`startup.detector`”选择。最终检测器为`digit`时，安装脚本要求
-`data/digits/templates/0`到`9`每类至少有一张能被OpenCV读取的PNG，否则列出缺失数字并拒绝
-安装；不会生成虚假模板。数字模板必须在Raspberry Pi现场采集后同步进仓库或最终部署目录。
-可单独执行部署检查：
-
-```bash
-python3 -m tools.check_digit_templates --detector digit
-```
+触摸模式固定启动`steel_ball_yolo_ncnn`，不恢复历史检测器选择；非触摸命令行和后端检测器工厂仍
+保持兼容。部署前请确认NCNN模型目录完整，并在树莓派现场完成两点位置标定。
 
 查看与控制：
 
