@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 import logging
 import math
 import time
@@ -12,6 +11,7 @@ import cv2
 import numpy as np
 
 from core.models import FramePacket, SteelBallNcnnConfig, TargetState, VisionResult
+from core.performance_metrics import RollingSamples
 from detectors.base_detector import BaseDetector
 from inference.steel_ball_ncnn_runtime import SteelBallNcnnRuntime
 
@@ -139,7 +139,10 @@ class SteelBallYoloNcnnDetector(BaseDetector):
             "postprocess": 0.0,
             "total": 0.0,
         }
-        self._total_history: deque[float] = deque(maxlen=120)
+        self._timing_history = {
+            name: RollingSamples(max_samples=120)
+            for name in ("preprocess", "inference", "postprocess", "total")
+        }
 
     def initialize(self) -> None:
         """Load the one NCNN model once; repeated initialize calls are harmless."""
@@ -240,7 +243,8 @@ class SteelBallYoloNcnnDetector(BaseDetector):
                 name: max(0.0, float(timings.get(name, 0.0)))
                 for name in ("preprocess", "inference", "postprocess", "total")
             }
-            self._total_history.append(self._last_timings["total"])
+            for name, value in self._last_timings.items():
+                self._timing_history[name].add(value)
             self._detections = detections
             self._selected = selected
             self.detector_error = ""
@@ -289,9 +293,9 @@ class SteelBallYoloNcnnDetector(BaseDetector):
         )
 
     def get_runtime_status(self) -> dict[str, Any]:
-        history = np.asarray(self._total_history, dtype=np.float64)
-        median_ms = float(np.median(history)) if history.size else 0.0
-        p95_ms = float(np.percentile(history, 95)) if history.size else 0.0
+        summaries = {
+            name: samples.summary() for name, samples in self._timing_history.items()
+        }
         total_ms = self._last_timings["total"]
         return {
             "steel_ball_backend": self.backend_name,
@@ -301,8 +305,10 @@ class SteelBallYoloNcnnDetector(BaseDetector):
             "preprocess_ms": round(self._last_timings["preprocess"], 3),
             "postprocess_ms": round(self._last_timings["postprocess"], 3),
             "total_ms": round(total_ms, 3),
-            "inference_median_ms": round(median_ms, 3),
-            "inference_p95_ms": round(p95_ms, 3),
+            "inference_median_ms": round(float(summaries["inference"]["median"]), 3),
+            "inference_p95_ms": round(float(summaries["inference"]["p95"]), 3),
+            "ncnn_total_median_ms": round(float(summaries["total"]["median"]), 3),
+            "ncnn_total_p95_ms": round(float(summaries["total"]["p95"]), 3),
             "estimated_fps": round(1000.0 / total_ms, 2) if total_ms > 0.0 else 0.0,
             "detection_count": len(self._detections),
             "selected_target_confidence": (

@@ -94,7 +94,20 @@ function renderStatus(status) {
   pollInterval = status.ui?.status_poll_interval_ms || pollInterval;
   parameterDebounce = status.ui?.parameter_debounce_ms ?? parameterDebounce;
   controlScheduler.setDebounceMs(parameterDebounce);
-  text("fps", Number(status.fps || 0).toFixed(1));
+  const visionFps = Number(status.vision_fps ?? status.fps ?? 0);
+  const cameraFps = Number(status.camera_fps ?? 0);
+  const previewFps = Number(status.preview_fps ?? 0);
+  const captureToResult = Number(status.capture_to_result_ms ?? 0);
+  const captureToResultP95 = Number(status.capture_to_result_p95_ms ?? 0);
+  text("fps", visionFps.toFixed(1));
+  text("cameraFps", cameraFps.toFixed(1));
+  text("previewFps", previewFps.toFixed(1));
+  text("pipelineFps", `${cameraFps.toFixed(1)} / ${visionFps.toFixed(1)} / ${previewFps.toFixed(1)} FPS`);
+  text("pipelineLatency", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
+  text(
+    "pipelineDrops",
+    `${Number(status.vision_skipped_camera_frames || 0)} / ${Number(status.preview_overwritten_count || 0)}`,
+  );
   text("txCount", status.vmc_tx_count || 0);
   text("targetClass", status.target_class || "—");
   text("detector", detectorLabel(status.detector));
@@ -109,7 +122,9 @@ function renderStatus(status) {
   text("cClass", status.target_class || "—");
   text("cState", status.state || "NONE");
   text("cConfidence", status.confidence || 0);
-  text("cFps", Number(status.fps || 0).toFixed(1));
+  text("cFps", visionFps.toFixed(1));
+  text("cPipelineFps", `${cameraFps.toFixed(1)} / ${visionFps.toFixed(1)} / ${previewFps.toFixed(1)}`);
+  text("cPipelineLatency", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
   text("cLinks", `${status.camera_online ? "ON" : "OFF"} / ${status.serial_online ? "ON" : "OFF"}`);
   const steelBallPanel = $("steelBallStatus");
   if (steelBallPanel) {
@@ -127,7 +142,11 @@ function renderStatus(status) {
           : (status.steel_ball_backend === "ncnn" ? "加载失败" : "不适用"),
       );
       text("steelBallCount", Number(status.detection_count || 0));
-      text("steelBallTiming", `${Number(status.total_ms || 0).toFixed(1)} ms`);
+      text(
+        "steelBallTiming",
+        `${Number(status.inference_ms || 0).toFixed(1)} / ${Number(status.inference_median_ms || 0).toFixed(1)} / ${Number(status.inference_p95_ms || 0).toFixed(1)} ms`,
+      );
+      text("steelBallE2E", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
     }
   }
   setTag("runningBadge", status.runtime_running ? "RUNNING" : "STOPPED", !!status.runtime_running);

@@ -25,6 +25,8 @@ from core.models import FramePacket, TargetState, VisionResult
 from core.state_machine import VisionMode, VisionStateMachine
 from core.vision_runtime import RuntimeCommandQueue, VisionRuntime
 from detectors.target_tracker import TargetTracker
+from protocol.vmc_messages import Flags, MessageType, VisionControl
+from protocol.vmc_protocol import VmcPacket
 from touch_ui.frame_stream import LatestFrameStream
 from touch_ui.models import CommandType, RuntimeCommand, load_touch_ui_config
 from touch_ui.server import TouchUIServer
@@ -150,11 +152,13 @@ def _runtime(
     args=None,
     initial_competition_mode=False,
     detector_id="color",
+    control_handler=_handle_control_messages,
+    mission_overrides=None,
 ) -> VisionRuntime:
     detector = detector or FakeDetector()
     camera = camera or FakeCamera(finished=True)
     serial = serial or FakeSerial()
-    mission = load_mission_config()
+    mission = load_mission_config(overrides=mission_overrides)
     processor = ControlProcessor(
         VisionStateMachine(VisionMode.TRACK),
         TargetTracker(),
@@ -169,7 +173,7 @@ def _runtime(
         detector_id=detector_id,
         camera_calibrated=False,
         control_processor=processor,
-        control_handler=_handle_control_messages,
+        control_handler=control_handler,
         display_handler=_handle_display,
         save_debug_frame=_save_debug_frame,
         detector_factory=detector_factory,
@@ -835,3 +839,186 @@ def test_runtime_stop_closes_enabled_camera_and_serial_once(tmp_path) -> None:
     thread.join(1)
     assert not thread.is_alive()
     assert camera.stop_count == 1 and serial.stop_count == 1
+
+
+def test_recent_vision_rate_resets_across_idle_and_does_not_include_idle(tmp_path) -> None:
+    runtime = _runtime(tmp_path, touch=False)
+    assert runtime._sync_vision_measurement_mode()
+    runtime._record_processed_frame(1, 1.0)
+    runtime._record_processed_frame(2, 2.0)
+    assert runtime._vision_rate.rate(2.0) == 1.0
+    runtime.control_processor.state_machine.mode = VisionMode.IDLE
+    assert not runtime._sync_vision_measurement_mode()
+    assert runtime._vision_rate.rate(20.0) == 0.0
+    runtime.control_processor.state_machine.mode = VisionMode.TRACK
+    assert runtime._sync_vision_measurement_mode()
+    assert runtime._vision_rate.rate(30.0) == 0.0
+
+
+def test_detector_switch_resets_recent_vision_window(tmp_path) -> None:
+    replacement = FakeDetector(target_class=9)
+    runtime = _runtime(
+        tmp_path,
+        touch=False,
+        detector_factory=lambda _name: replacement,
+    )
+    runtime._record_processed_frame(1, 1.0)
+    runtime._record_processed_frame(2, 2.0)
+    runtime._switch_detector("shape")
+    assert runtime._vision_rate.event_count == 0
+    assert runtime._previous_processed_frame_id is None
+
+
+def test_processed_frame_gap_counts_skipped_camera_frames(tmp_path) -> None:
+    runtime = _runtime(tmp_path, touch=False)
+    runtime._record_processed_frame(10, 1.0)
+    runtime._record_processed_frame(14, 2.0)
+    runtime._record_processed_frame(15, 3.0)
+    assert runtime._vision_processed_count == 3
+    assert runtime._vision_skipped_camera_frames == 3
+
+
+def test_runtime_maps_actual_and_reported_camera_fps_separately(tmp_path) -> None:
+    runtime = _runtime(tmp_path, touch=False)
+    runtime._update_result_state(
+        None,
+        12.5,
+        {"port_open": False, "tx_count": 0},
+        {
+            "frames_ok": 4,
+            "frames_failed": 2,
+            "actual_fps": 27.5,
+            "device_reported_fps": 30.0,
+            "latest_frame_age_s": 0.012,
+            "actual_width": 640,
+            "actual_height": 480,
+            "actual_fourcc": "MJPG",
+            "reconnects": 1,
+        },
+    )
+    status = runtime.get_status_snapshot()
+    assert status["camera_fps"] == 27.5
+    assert status["camera_reported_fps"] == 30.0
+    assert status["camera_frame_age_ms"] == 12.0
+    assert status["camera_fourcc"] == "MJPG"
+    assert status["fps"] == status["vision_fps"] == 12.5
+
+
+def test_runtime_records_frame_age_capture_latency_and_skips(tmp_path) -> None:
+    captured = time.monotonic() - 0.02
+    frames = [
+        FramePacket(1, captured, np.zeros((40, 60, 3), np.uint8)),
+        FramePacket(4, captured, np.zeros((40, 60, 3), np.uint8)),
+    ]
+    runtime = _runtime(tmp_path, camera=FakeCamera(frames=frames, finished=True), touch=False)
+    assert runtime.run_forever() == 0
+    status = runtime.get_status_snapshot()
+    assert status["vision_processed_count"] == 2
+    assert status["vision_skipped_camera_frames"] == 2
+    assert status["frame_age_before_process_ms"] >= 15
+    assert status["capture_to_result_ms"] >= status["frame_age_before_process_ms"]
+    assert status["vision_loop_ms"] >= status["tracker_ms"]
+
+
+def test_uart_idle_to_track_applies_before_first_frame_and_resets_recent_window(
+    tmp_path,
+) -> None:
+    detector = FakeDetector()
+    frame = FramePacket(1, time.monotonic(), np.zeros((20, 20, 3), np.uint8))
+    handler_calls: list[int] = []
+
+    def enter_track(_serial, processor, sequence):
+        handler_calls.append(sequence)
+        if len(handler_calls) == 1:
+            assert processor.set_mode(VisionMode.TRACK)
+        return sequence + 1
+
+    runtime = _runtime(
+        tmp_path,
+        detector=detector,
+        camera=FakeCamera([frame], finished=True),
+        touch=False,
+        control_handler=enter_track,
+        mission_overrides={"serial_protocol_mode": "hybrid_v10"},
+    )
+    runtime.control_processor.state_machine.mode = VisionMode.IDLE
+    runtime._measurement_mode_active = False
+    runtime._vision_rate.record(1.0)
+    runtime._vision_rate.record(2.0)
+    runtime._performance_samples["vision_loop"].add(999.0)
+    assert runtime.run_forever() == 0
+    assert handler_calls and detector.process_count == 1
+    assert runtime._vision_rate.event_count == 1
+    assert runtime._performance_samples["vision_loop"].summary()["count"] == 1
+    assert runtime.get_status_snapshot()["mode"] == "TRACK"
+
+
+def test_uart_track_to_idle_blocks_first_frame_and_resets_recent_window(
+    tmp_path,
+) -> None:
+    detector = FakeDetector()
+    frame = FramePacket(1, time.monotonic(), np.zeros((20, 20, 3), np.uint8))
+    handler_calls: list[int] = []
+
+    def enter_idle(_serial, processor, sequence):
+        handler_calls.append(sequence)
+        if len(handler_calls) == 1:
+            assert processor.set_mode(VisionMode.IDLE)
+        return sequence + 1
+
+    runtime = _runtime(
+        tmp_path,
+        detector=detector,
+        camera=FakeCamera([frame], finished=True),
+        touch=False,
+        control_handler=enter_idle,
+        mission_overrides={"serial_protocol_mode": "hybrid_v10"},
+    )
+    runtime._measurement_mode_active = True
+    runtime._vision_rate.record(1.0)
+    runtime._vision_rate.record(2.0)
+    runtime._performance_samples["capture_to_result"].add(123.0)
+    assert runtime.run_forever() == 0
+    assert handler_calls and detector.process_count == 0
+    assert runtime._vision_rate.event_count == 0
+    assert runtime._performance_samples["capture_to_result"].summary()["count"] == 0
+    assert runtime.get_status_snapshot()["mode"] == "IDLE"
+
+
+def test_uart_mode_change_keeps_ack_and_applies_before_frame(tmp_path) -> None:
+    class ControlSerial(FakeSerial):
+        def __init__(self) -> None:
+            super().__init__(online=True)
+            self.messages = [
+                VmcPacket(
+                    MessageType.VISION_CONTROL,
+                    int(Flags.ACK_REQ),
+                    9,
+                    VisionControl(7, VisionMode.TRACK, target_class=1).pack(),
+                )
+            ]
+            self.sent = []
+
+        def get_message(self):
+            return self.messages.pop(0) if self.messages else None
+
+        def send_packet(self, *args, **_kwargs):
+            self.sent.append(args)
+            return True
+
+    serial = ControlSerial()
+    detector = FakeDetector(target_class=1)
+    frame = FramePacket(1, time.monotonic(), np.zeros((20, 20, 3), np.uint8))
+    runtime = _runtime(
+        tmp_path,
+        detector=detector,
+        camera=FakeCamera([frame], finished=True),
+        serial=serial,
+        touch=False,
+        mission_overrides={"serial_protocol_mode": "hybrid_v10"},
+    )
+    runtime.control_processor.state_machine.mode = VisionMode.IDLE
+    assert runtime.run_forever() == 0
+    assert detector.process_count == 1
+    assert runtime.get_status_snapshot()["mode"] == "TRACK"
+    assert serial.sent[0][0] == MessageType.ACK

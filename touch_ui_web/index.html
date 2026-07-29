@@ -14,7 +14,7 @@
         <span id="overlayDetector">—</span>
         <strong id="overlayTarget">—</strong>
         <span id="overlayState">NONE</span>
-        <span>FPS <b id="fps">0.0</b></span>
+        <span>摄像头 <b id="cameraFps">0.0</b> / 识别 <b id="fps">0.0</b> / 预览 <b id="previewFps">0.0</b></span>
       </div>
     </section>
 
@@ -47,13 +47,17 @@
           <div><dt>VMC-Link TX</dt><dd id="txCount">0</dd></div>
           <div><dt>Mode</dt><dd id="mode">—</dd></div>
           <div><dt>Center</dt><dd id="center">-1, -1</dd></div>
+          <div><dt>摄像头 / 识别 / 预览</dt><dd id="pipelineFps">0 / 0 / 0 FPS</dd></div>
+          <div><dt>端到端 当前 / P95</dt><dd id="pipelineLatency">0 / 0 ms</dd></div>
+          <div><dt>跳帧 / 预览覆盖</dt><dd id="pipelineDrops">0 / 0</dd></div>
         </dl>
 
         <dl id="steelBallStatus" class="telemetry-lines" hidden>
           <div><dt>钢球识别</dt><dd id="steelBallBackend">—</dd></div>
           <div><dt>模型</dt><dd id="steelBallModel">—</dd></div>
           <div><dt>当前检测</dt><dd><span id="steelBallCount">0</span>个</dd></div>
-          <div><dt>推理</dt><dd id="steelBallTiming">0.0 ms</dd></div>
+          <div><dt>推理 当前 / 中位 / P95</dt><dd id="steelBallTiming">0 / 0 / 0 ms</dd></div>
+          <div><dt>端到端 当前 / P95</dt><dd id="steelBallE2E">0 / 0 ms</dd></div>
         </dl>
 
         <div id="lastError" class="error-line">无错误</div>
@@ -83,6 +87,8 @@
           <div><dt>State</dt><dd id="cState">NONE</dd></div>
           <div><dt>Confidence</dt><dd id="cConfidence">0</dd></div>
           <div><dt>FPS</dt><dd id="cFps">0</dd></div>
+          <div><dt>摄像头 / 识别 / 预览</dt><dd id="cPipelineFps">0 / 0 / 0</dd></div>
+          <div><dt>端到端 当前 / P95</dt><dd id="cPipelineLatency">0 / 0 ms</dd></div>
           <div><dt>CAM / UART</dt><dd id="cLinks">OFF / OFF</dd></div>
         </dl>
         <p>长按右上角维护按钮可退出比赛模式、kiosk或视觉服务。</p>

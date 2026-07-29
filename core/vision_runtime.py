@@ -14,6 +14,7 @@ import cv2
 
 from core.fault_manager import Fault, FaultManager
 from core.models import CameraConfig, VisionResult
+from core.performance_metrics import RollingRate, RollingSamples
 from core.state_machine import VisionMode
 from detectors.digit_detector import DigitDetector
 from detectors.steel_ball_detector import SteelBallDetector
@@ -127,6 +128,28 @@ class VisionRuntime:
                 "error_x": 0,
                 "error_y": 0,
                 "fps": 0.0,
+                "vision_fps": 0.0,
+                "camera_fps": 0.0,
+                "camera_reported_fps": 0.0,
+                "preview_fps": 0.0,
+                "preview_submitted_count": 0,
+                "preview_encoded_count": 0,
+                "preview_overwritten_count": 0,
+                "preview_encode_ms": 0.0,
+                "preview_encode_median_ms": 0.0,
+                "preview_encode_p95_ms": 0.0,
+                "preview_age_ms": 0.0,
+                "preview_jpeg_bytes": 0,
+                "preview_pending": False,
+                "vision_processed_count": 0,
+                "vision_skipped_camera_frames": 0,
+                "camera_frame_age_ms": 0.0,
+                "camera_actual_width": 0,
+                "camera_actual_height": 0,
+                "camera_fourcc": "",
+                "camera_frames_ok": 0,
+                "camera_frames_failed": 0,
+                "camera_reconnects": 0,
                 "camera_online": False,
                 "serial_online": False,
                 "vmc_tx_count": 0,
@@ -141,11 +164,33 @@ class VisionRuntime:
                 "preprocess_ms": 0.0,
                 "postprocess_ms": 0.0,
                 "total_ms": 0.0,
+                "inference_median_ms": 0.0,
+                "inference_p95_ms": 0.0,
+                "ncnn_total_median_ms": 0.0,
+                "ncnn_total_p95_ms": 0.0,
                 "estimated_fps": 0.0,
                 "detection_count": 0,
                 "selected_target_confidence": 0.0,
                 "ncnn_threads": 0,
                 "detector_error": "",
+                "frame_age_before_process_ms": 0.0,
+                "frame_age_before_process_median_ms": 0.0,
+                "frame_age_before_process_p95_ms": 0.0,
+                "capture_to_result_ms": 0.0,
+                "capture_to_result_median_ms": 0.0,
+                "capture_to_result_p95_ms": 0.0,
+                "vision_loop_ms": 0.0,
+                "vision_loop_median_ms": 0.0,
+                "vision_loop_p95_ms": 0.0,
+                "tracker_ms": 0.0,
+                "tracker_median_ms": 0.0,
+                "tracker_p95_ms": 0.0,
+                "draw_debug_ms": 0.0,
+                "draw_debug_median_ms": 0.0,
+                "draw_debug_p95_ms": 0.0,
+                "preview_submit_ms": 0.0,
+                "preview_submit_median_ms": 0.0,
+                "preview_submit_p95_ms": 0.0,
                 "last_error": "",
                 "camera_controls": {},
                 "ui": {
@@ -183,6 +228,22 @@ class VisionRuntime:
         self._last_camera_online: bool | None = None
         self._last_serial_online: bool | None = None
         self._last_camera_reconnects: int | None = None
+        self._vision_rate = RollingRate(window_seconds=2.0, max_events=512)
+        self._performance_samples = {
+            name: RollingSamples(max_samples=120)
+            for name in (
+                "frame_age_before_process",
+                "capture_to_result",
+                "vision_loop",
+                "tracker",
+                "draw_debug",
+                "preview_submit",
+            )
+        }
+        self._vision_processed_count = 0
+        self._vision_skipped_camera_frames = 0
+        self._previous_processed_frame_id: int | None = None
+        self._measurement_mode_active = False
 
     @staticmethod
     def _configured_controls(config: CameraConfig | None) -> dict[str, int]:
@@ -383,12 +444,54 @@ class VisionRuntime:
         )
         self.control_processor.reset_callback = getattr(new_detector, "reset", None)
         self.control_processor.tracker.reset()
+        self._reset_vision_measurement_window()
         if hasattr(old, "reset"):
             old.reset()
         if hasattr(old, "close"):
             old.close()
         self.state_store.update(detector=name, last_error="", **self._detector_status())
         LOG.info("检测器已切换: %s", name)
+
+    def _reset_vision_measurement_window(self) -> None:
+        """Reset recent-rate/latency windows without erasing cumulative counters."""
+
+        self._vision_rate.reset()
+        for samples in self._performance_samples.values():
+            samples.reset()
+        self._previous_processed_frame_id = None
+
+    def _sync_vision_measurement_mode(self) -> bool:
+        active = self.control_processor.state_machine.mode in (
+            VisionMode.SEARCH,
+            VisionMode.TRACK,
+        )
+        if active != self._measurement_mode_active:
+            self._reset_vision_measurement_window()
+            self._measurement_mode_active = active
+        return active
+
+    def _record_processed_frame(self, frame_id: int, completed_at: float) -> None:
+        previous = self._previous_processed_frame_id
+        if previous is not None and frame_id > previous:
+            self._vision_skipped_camera_frames += max(0, frame_id - previous - 1)
+        self._previous_processed_frame_id = frame_id
+        self._vision_processed_count += 1
+        self._vision_rate.record(completed_at)
+
+    def _record_sample(self, name: str, milliseconds: float) -> None:
+        self._performance_samples[name].add(max(0.0, milliseconds))
+
+    def _performance_status(self) -> dict[str, int | float]:
+        status: dict[str, int | float] = {
+            "vision_processed_count": self._vision_processed_count,
+            "vision_skipped_camera_frames": self._vision_skipped_camera_frames,
+        }
+        for name, samples in self._performance_samples.items():
+            summary = samples.summary()
+            status[f"{name}_ms"] = round(float(summary["last"]), 3)
+            status[f"{name}_median_ms"] = round(float(summary["median"]), 3)
+            status[f"{name}_p95_ms"] = round(float(summary["p95"]), 3)
+        return status
 
     def _detector_status(self) -> dict[str, Any]:
         provider = getattr(self.detector, "get_runtime_status", None)
@@ -648,6 +751,22 @@ class VisionRuntime:
         if serial_online != self._last_serial_online:
             LOG.info("串口状态: %s", "ONLINE" if serial_online else "OFFLINE")
             self._last_serial_online = serial_online
+        preview_stats = (
+            self.frame_stream.get_statistics()
+            if self.touch_config is not None
+            else {
+                "preview_fps": 0.0,
+                "preview_submitted_count": 0,
+                "preview_encoded_count": 0,
+                "preview_overwritten_count": 0,
+                "preview_encode_ms": 0.0,
+                "preview_encode_median_ms": 0.0,
+                "preview_encode_p95_ms": 0.0,
+                "preview_age_ms": 0.0,
+                "preview_jpeg_bytes": 0,
+                "preview_pending": False,
+            }
+        )
         self.state_store.update(
             target_class=int(result.target_class) if found and result else 0,
             state=state_names.get(target_state, "NONE"),
@@ -657,6 +776,23 @@ class VisionRuntime:
             error_x=int(result.error_x_px) if found and result else 0,
             error_y=int(result.error_y_px) if found and result else 0,
             fps=round(fps, 2),
+            vision_fps=round(fps, 2),
+            camera_fps=round(float(camera_stats.get("actual_fps", 0.0) or 0.0), 2),
+            camera_reported_fps=round(
+                float(camera_stats.get("device_reported_fps", 0.0) or 0.0), 2
+            ),
+            camera_frame_age_ms=round(
+                float(camera_stats.get("latest_frame_age_s", 0.0) or 0.0) * 1000.0,
+                3,
+            ),
+            camera_actual_width=int(camera_stats.get("actual_width", 0) or 0),
+            camera_actual_height=int(camera_stats.get("actual_height", 0) or 0),
+            camera_fourcc=str(camera_stats.get("actual_fourcc", "") or ""),
+            camera_frames_ok=int(
+                camera_stats.get("frames_ok", camera_stats.get("frames_captured", 0)) or 0
+            ),
+            camera_frames_failed=int(camera_stats.get("frames_failed", 0) or 0),
+            camera_reconnects=int(camera_stats.get("reconnects", 0) or 0),
             camera_online=camera_online,
             serial_online=serial_online,
             vmc_tx_count=int(serial_stats.get("tx_count", 0)),
@@ -664,6 +800,8 @@ class VisionRuntime:
             vision_output_enabled=bool(
                 self.state_store.snapshot().get("competition_mode", False)
             ),
+            **preview_stats,
+            **self._performance_status(),
             **self._detector_status(),
         )
 
@@ -695,6 +833,7 @@ class VisionRuntime:
         last_frame_seen = started
         last_frame_id: int | None = None
         service_sequence = 0
+        hybrid_v10 = self.mission["serial_protocol_mode"] == "hybrid_v10"
         processed = 0
         process_time_total = 0.0
         display = (bool(getattr(self.args, "display", False)) or bool(self.mission["display"])) and not bool(
@@ -707,24 +846,24 @@ class VisionRuntime:
                 self.process_pending_commands()
                 if hasattr(self.serial_service, "raise_if_failed"):
                     self.serial_service.raise_if_failed()
-                service_sequence = self.control_handler(
-                    self.serial_service, self.control_processor, service_sequence
-                )
+                if hybrid_v10:
+                    service_sequence = self.control_handler(
+                        self.serial_service, self.control_processor, service_sequence
+                    )
+                vision_mode_active = self._sync_vision_measurement_mode()
                 serial_stats = self.serial_service.get_statistics()
-                peer_alive = (
-                    self.peer_alive_checker(
+                peer_alive = bool(serial_stats.get("port_open", False))
+                if hybrid_v10 and self.peer_alive_checker is not None:
+                    peer_alive = self.peer_alive_checker(
                         serial_stats,
                         now,
                         self.mission["serial_link_timeout_ms"] / 1000.0,
                     )
-                    if self.peer_alive_checker is not None
-                    else bool(serial_stats.get("port_open", False))
-                )
                 if self.serial_service.enabled and not peer_alive:
                     faults.set_fault(Fault.SERIAL_LINK_DOWN)
                 else:
                     faults.clear_fault(Fault.SERIAL_LINK_DOWN)
-                if now - last_heartbeat >= 1.0 / self.mission["heartbeat_hz"]:
+                if hybrid_v10 and now - last_heartbeat >= 1.0 / self.mission["heartbeat_hz"]:
                     heartbeat = Heartbeat(
                         uptime_ms=int((now - started) * 1000) & 0xFFFFFFFF,
                         system_state=1 if faults.fault_bits() else 0,
@@ -758,22 +897,38 @@ class VisionRuntime:
                 last_frame_seen = now
                 faults.clear_fault(Fault.CAMERA_FRAME_TIMEOUT)
                 result: VisionResult | None = None
-                if self.control_processor.state_machine.mode in (VisionMode.SEARCH, VisionMode.TRACK):
+                if vision_mode_active:
                     process_start = time.monotonic()
+                    frame_age_ms = max(
+                        0.0, (process_start - frame.capture_timestamp) * 1000.0
+                    )
                     try:
                         detected = self.detector.process(frame)
-                        result = (
-                            detected
-                            if isinstance(self.detector, (SteelBallDetector, DigitDetector))
-                            else self.control_processor.tracker.update(detected)
+                        tracker_ms = 0.0
+                        if isinstance(self.detector, (SteelBallDetector, DigitDetector)):
+                            result = detected
+                        else:
+                            tracker_started = time.monotonic()
+                            result = self.control_processor.tracker.update(detected)
+                            tracker_ms = (time.monotonic() - tracker_started) * 1000.0
+                        completed_at = time.monotonic()
+                        self._record_processed_frame(frame.frame_id, completed_at)
+                        self._record_sample("frame_age_before_process", frame_age_ms)
+                        self._record_sample("tracker", tracker_ms)
+                        self._record_sample(
+                            "capture_to_result",
+                            (completed_at - frame.capture_timestamp) * 1000.0,
                         )
+                        self._record_sample(
+                            "vision_loop", (completed_at - process_start) * 1000.0
+                        )
+                        processed += 1
                         faults.clear_fault(Fault.DETECTOR_FAILED)
                     except Exception as exc:
                         faults.set_fault(Fault.DETECTOR_FAILED)
                         self.state_store.update(last_error=str(exc))
                         LOG.exception("检测器处理失败")
                     process_time_total += time.monotonic() - process_start
-                    processed += 1
                     if (
                         result is not None
                         and self.state_store.snapshot().get("competition_mode", False)
@@ -787,12 +942,20 @@ class VisionRuntime:
                 annotated = None
                 if self.touch_config is not None:
                     try:
+                        draw_started = time.monotonic()
                         annotated = (
                             self.detector.draw_debug(frame.image, result)
                             if result is not None
                             else frame.image.copy()
                         )
+                        self._record_sample(
+                            "draw_debug", (time.monotonic() - draw_started) * 1000.0
+                        )
+                        submit_started = time.monotonic()
                         self.frame_stream.submit_frame(annotated)
+                        self._record_sample(
+                            "preview_submit", (time.monotonic() - submit_started) * 1000.0
+                        )
                     except Exception as exc:
                         self.state_store.update(last_error=f"预览生成失败: {exc}")
                         LOG.warning("预览生成失败，视觉继续运行: %s", exc)
@@ -813,7 +976,7 @@ class VisionRuntime:
                 camera_stats = self.camera_service.get_statistics()
                 if self.touch_config is not None:
                     self._reapply_overrides_after_reconnect(camera_stats)
-                fps = processed / max(now - started, 0.001)
+                fps = self._vision_rate.rate(time.monotonic())
                 self._update_result_state(result, fps, serial_stats, camera_stats)
                 if now - last_statistics >= self.mission["statistics_interval_s"]:
                     LOG.info(

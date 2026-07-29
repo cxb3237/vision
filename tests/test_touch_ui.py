@@ -206,6 +206,104 @@ def test_preview_recovers_after_placeholder_without_recreating_source() -> None:
     assert recovered and recovered != placeholder
 
 
+def test_preview_statistics_count_submissions_and_pending_overwrites() -> None:
+    stream = LatestFrameStream(max_fps=20)
+    frame = np.zeros((40, 60, 3), np.uint8)
+    stream.submit_frame(frame)
+    stream.submit_frame(frame)
+    statistics = stream.get_statistics()
+    assert statistics["preview_submitted_count"] == 2
+    assert statistics["preview_overwritten_count"] == 1
+    assert statistics["preview_pending"] is True
+
+
+def test_preview_statistics_measure_encoding_rate_age_and_size() -> None:
+    stream = LatestFrameStream(max_fps=30)
+    stream.start()
+    for value in (10, 20):
+        stream.submit_frame(np.full((40, 60, 3), value, np.uint8))
+        deadline = time.monotonic() + 1
+        expected = value // 10
+        while stream.encoded_count < expected and time.monotonic() < deadline:
+            time.sleep(0.005)
+    statistics = stream.get_statistics()
+    stream.stop()
+    assert statistics["preview_encoded_count"] >= 2
+    assert statistics["preview_fps"] > 0
+    assert statistics["preview_encode_ms"] >= 0
+    assert statistics["preview_encode_p95_ms"] >= statistics["preview_encode_median_ms"]
+    assert statistics["preview_age_ms"] >= 0
+    assert statistics["preview_jpeg_bytes"] > 0
+
+
+def test_preview_get_statistics_is_thread_safe_under_submission() -> None:
+    stream = LatestFrameStream(max_fps=30)
+    stream.start()
+    frame = np.zeros((20, 30, 3), np.uint8)
+    threads = [threading.Thread(target=lambda: [stream.submit_frame(frame) for _ in range(20)]) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    statistics = stream.get_statistics()
+    stream.stop()
+    assert statistics["preview_submitted_count"] == 60
+    assert statistics["preview_overwritten_count"] >= 1
+
+
+def test_preview_clear_buffers_is_rejected_while_encoder_is_running() -> None:
+    stream = LatestFrameStream(max_fps=20)
+    stream.start()
+    try:
+        with pytest.raises(RuntimeError, match="thread to be stopped"):
+            stream.reset_statistics(clear_buffers=True)
+    finally:
+        stream.stop()
+
+
+def test_preview_clear_buffers_after_stop_removes_pending_and_jpeg() -> None:
+    stream = LatestFrameStream(max_fps=20)
+    stream.start()
+    stream.submit_frame(np.full((40, 60, 3), 90, np.uint8))
+    deadline = time.monotonic() + 1
+    while stream.encoded_count < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    stream.stop()
+    stream.submit_frame(np.zeros((40, 60, 3), np.uint8))
+    assert stream.get_latest_jpeg(placeholder=False) is not None
+    assert stream.get_statistics()["preview_pending"] is True
+    stream.reset_statistics(clear_buffers=True)
+    statistics = stream.get_statistics()
+    assert stream.get_latest_jpeg(placeholder=False) is None
+    assert statistics["preview_pending"] is False
+    assert statistics["preview_jpeg_bytes"] == 0
+    assert statistics["preview_submitted_count"] == 0
+    assert statistics["preview_encoded_count"] == 0
+    assert statistics["preview_overwritten_count"] == 0
+
+
+def test_preview_warmup_counts_do_not_cross_clean_measurement_boundary() -> None:
+    stream = LatestFrameStream(max_fps=30)
+    frame = np.zeros((40, 60, 3), np.uint8)
+    stream.start()
+    stream.submit_frame(frame)
+    deadline = time.monotonic() + 1
+    while stream.encoded_count < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    stream.stop()
+    assert stream.encoded_count >= 1
+    stream.reset_statistics(clear_buffers=True)
+    stream.start()
+    stream.submit_frame(frame)
+    deadline = time.monotonic() + 1
+    while stream.encoded_count < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    stream.stop()
+    statistics = stream.get_statistics()
+    assert statistics["preview_submitted_count"] == 1
+    assert statistics["preview_encoded_count"] == 1
+
+
 def test_runtime_save_is_atomic_and_creates_backup(tmp_path) -> None:
     store = RuntimeConfigStore(touch_config(tmp_path))
     store.save_camera_override({"brightness": 10})

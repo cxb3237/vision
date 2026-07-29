@@ -8,6 +8,8 @@ import time
 import cv2
 import numpy as np
 
+from core.performance_metrics import RollingRate, RollingSamples
+
 
 class LatestFrameStream:
     def __init__(self, max_fps: float = 10.0, jpeg_quality: int = 80, max_width: int = 960):
@@ -26,7 +28,12 @@ class LatestFrameStream:
         self._jpeg: bytes | None = None
         self._jpeg_id = 0
         self._jpeg_monotonic = 0.0
+        self._jpeg_size_bytes = 0
+        self._submitted_count = 0
         self._encoded_count = 0
+        self._overwritten_count = 0
+        self._preview_rate = RollingRate(window_seconds=2.0, max_events=256)
+        self._encode_samples = RollingSamples(max_samples=120)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._placeholder = self._create_placeholder()
@@ -68,6 +75,9 @@ class LatestFrameStream:
         if not isinstance(image, np.ndarray) or image.ndim not in (2, 3):
             raise ValueError("预览帧必须为OpenCV图像")
         with self._condition:
+            self._submitted_count += 1
+            if self._pending is not None:
+                self._overwritten_count += 1
             self._pending = image.copy()
             self._pending_id += 1
             frame_id = self._pending_id
@@ -99,17 +109,22 @@ class LatestFrameStream:
                     (self.max_width, max(1, int(round(height * scale)))),
                     interpolation=cv2.INTER_AREA,
                 )
+            encode_started = time.monotonic()
             ok, encoded = cv2.imencode(
                 ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
             )
-            next_encode = time.monotonic() + interval
+            encoded_at = time.monotonic()
+            self._encode_samples.add((encoded_at - encode_started) * 1000.0)
+            next_encode = encoded_at + interval
             if not ok:
                 continue
             with self._condition:
                 self._jpeg = encoded.tobytes()
                 self._jpeg_id = frame_id
-                self._jpeg_monotonic = time.monotonic()
+                self._jpeg_monotonic = encoded_at
+                self._jpeg_size_bytes = len(self._jpeg)
                 self._encoded_count += 1
+                self._preview_rate.record(encoded_at)
                 self._condition.notify_all()
 
     def get_latest_jpeg(
@@ -139,3 +154,51 @@ class LatestFrameStream:
     def encoded_count(self) -> int:
         with self._condition:
             return self._encoded_count
+
+    def get_statistics(self) -> dict[str, int | float | bool]:
+        """Return bounded preview-pipeline measurements without exposing images."""
+
+        now = time.monotonic()
+        with self._condition:
+            submitted = self._submitted_count
+            encoded = self._encoded_count
+            overwritten = self._overwritten_count
+            jpeg_monotonic = self._jpeg_monotonic
+            jpeg_size = self._jpeg_size_bytes
+            pending = self._pending is not None
+        encode = self._encode_samples.summary()
+        return {
+            "preview_submitted_count": submitted,
+            "preview_encoded_count": encoded,
+            "preview_overwritten_count": overwritten,
+            "preview_fps": self._preview_rate.rate(now),
+            "preview_encode_ms": float(encode["last"]),
+            "preview_encode_median_ms": float(encode["median"]),
+            "preview_encode_p95_ms": float(encode["p95"]),
+            "preview_age_ms": (
+                max(0.0, (now - jpeg_monotonic) * 1000.0) if jpeg_monotonic else 0.0
+            ),
+            "preview_jpeg_bytes": jpeg_size,
+            "preview_pending": pending,
+        }
+
+    def reset_statistics(self, clear_buffers: bool = False) -> None:
+        """Reset measurements, optionally clearing buffers at a stopped boundary."""
+
+        with self._condition:
+            if clear_buffers and self._thread is not None and self._thread.is_alive():
+                raise RuntimeError(
+                    "clear_buffers requires the preview encoding thread to be stopped"
+                )
+            if clear_buffers:
+                self._pending = None
+                self._pending_id = 0
+                self._jpeg = None
+                self._jpeg_id = 0
+                self._jpeg_monotonic = 0.0
+                self._jpeg_size_bytes = 0
+            self._submitted_count = 0
+            self._encoded_count = 0
+            self._overwritten_count = 0
+            self._preview_rate.reset()
+            self._encode_samples.reset()

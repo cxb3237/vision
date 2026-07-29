@@ -111,3 +111,21 @@ def test_maintenance_requires_long_press_and_danger_confirmation() -> None:
 def test_portrait_layout_keeps_preview_above_dock() -> None:
     assert "@media (orientation: portrait), (max-width: 700px)" in CSS
     assert "grid-template-rows: minmax(0, 56dvh) minmax(0, 44dvh)" in CSS
+
+
+def test_performance_panel_prefers_vision_fps_with_legacy_fallback() -> None:
+    assert "status.vision_fps ?? status.fps ?? 0" in JS
+    assert 'id="cameraFps"' in HTML
+    assert 'id="previewFps"' in HTML
+    assert 'id="pipelineFps"' in HTML
+    assert 'id="pipelineLatency"' in HTML
+    assert 'id="pipelineDrops"' in HTML
+
+
+def test_performance_panel_keeps_ncnn_and_end_to_end_latency_distinct() -> None:
+    assert "status.inference_ms" in JS
+    assert "status.inference_median_ms" in JS
+    assert "status.inference_p95_ms" in JS
+    assert "status.capture_to_result_ms" in JS
+    assert "status.capture_to_result_p95_ms" in JS
+    assert "status.preview_overwritten_count" in JS
