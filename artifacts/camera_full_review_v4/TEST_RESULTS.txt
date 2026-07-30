@@ -1,0 +1,72 @@
+## Python compile
+COMMAND: python -m compileall -q .
+EXIT_CODE: 0
+CLASSIFICATION: PASS
+
+## Python tests
+COMMAND: python -m pytest -q -rs
+........................................................................ [ 31%]
+...............................sssss.................................... [ 63%]
+........................ss.............................................. [ 95%]
+..........                                                               [100%]
+=========================== short test summary info ===========================
+SKIPPED [5] tests\test_kiosk_script_runtime.py:21: kiosk运行时脚本测试仅在Linux执行
+SKIPPED [1] tests\test_touch_javascript.py:17: 当前环境没有Node.js，跳过纯JavaScript状态机测试
+SKIPPED [1] tests\test_touch_javascript.py:41: 浏览器几何测试需设置RUN_TOUCH_PLAYWRIGHT_TESTS=1显式启用
+219 passed, 7 skipped in 2.27s
+EXIT_CODE: 0
+CLASSIFICATION: PASS / SKIPPED
+
+## JavaScript syntax app
+COMMAND: node --check touch_ui_web/app.js
+EXIT_CODE: 0
+CLASSIFICATION: PASS
+
+## JavaScript syntax scheduler
+COMMAND: node --check touch_ui_web/control_scheduler.js
+EXIT_CODE: 0
+CLASSIFICATION: PASS
+
+## JavaScript scheduler tests
+COMMAND: node --test tests/js/control_scheduler.test.js
+✔ 不同参数的debounce和已发送请求互不取消 (58.9244ms)
+✔ 同一参数快速变化只发送最新值 (0.9088ms)
+✔ 已发送旧值的延迟响应不能覆盖更新目标 (42.4472ms)
+✔ 恢复基准会取消尚未发送的编辑 (0.6338ms)
+✔ 已完成等待同步阶段可区分 (1.7ms)
+✔ 触摸手势达到阈值后才锁定方向 (0.1786ms)
+✔ 步进取整以minimum为基准且不会累积浮点误差 (0.3082ms)
+✔ 可写过滤隐藏不支持只读和无效范围 (0.2084ms)
+✔ 中文名称和枚举显示不改变原始值 (0.3449ms)
+✔ 自动模式根据choices语义判断并保留原始枚举 (0.3505ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 176.4858
+EXIT_CODE: 0
+CLASSIFICATION: PASS / SKIPPED
+
+## Shell syntax start_kiosk
+COMMAND: bash -n deploy/start_kiosk.sh
+EXIT_CODE: 0
+CLASSIFICATION: PASS
+
+## Shell syntax install_touch_ui
+COMMAND: bash -n deploy/install_touch_ui.sh
+EXIT_CODE: 0
+CLASSIFICATION: PASS
+
+## Shell syntax uninstall_touch_ui
+COMMAND: bash -n deploy/uninstall_touch_ui.sh
+EXIT_CODE: 0
+CLASSIFICATION: PASS
+
+## Git whitespace check
+COMMAND: git diff --check
+EXIT_CODE: 0
+CLASSIFICATION: PASS
+

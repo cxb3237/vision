@@ -1,0 +1,3 @@
+COMMAND: git apply --check GIT_DIFF.patch (clean git archive HEAD)
+EXIT_CODE: 0
+CLASSIFICATION: PASS

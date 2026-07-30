@@ -1,0 +1,10 @@
+deploy/start_kiosk.sh
+deploy/vision-touch-kiosk.desktop.template
+tests/test_kiosk_exit.py
+tests/test_kiosk_script_runtime.py
+touch_ui/kiosk.py
+touch_ui_web/app.js
+touch_ui_web/assets/.gitkeep
+touch_ui_web/control_scheduler.js
+touch_ui_web/index.html
+touch_ui_web/style.css

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>钢球比赛图传</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="competition-shell">
+    <header class="status-bar" aria-label="运行状态">
+      <div class="brand"><strong>钢球比赛图传</strong><span id="backendStatus">正在连接</span></div>
+      <div class="status-item"><span>摄像头</span><strong id="cameraStatus">未知</strong></div>
+      <div class="status-item"><span>录像</span><strong id="recordingStatus">未录像</strong></div>
+      <div class="status-item"><span>计时</span><strong id="recordingTimer">00:00</strong></div>
+      <div class="status-item"><span>空间</span><strong id="freeSpace">--</strong></div>
+    </header>
+
+    <section class="preview-card" aria-label="实时摄像头画面">
+      <img id="preview" src="/api/preview.mjpg" alt="实时摄像头画面">
+      <div id="offlineNotice" class="offline-notice" hidden>
+        <strong>比赛后端不可用</strong>
+        <span>正在自动重试，请确认视觉主服务仍在运行。</span>
+      </div>
+      <div class="recording-overlay" id="recordingOverlay" hidden><i></i> REC</div>
+      <div class="file-overlay" id="currentFile">尚未开始录像</div>
+    </section>
+
+    <section class="recording-detail" aria-label="录像统计">
+      <span>文件 <strong id="detailFile">--</strong></span>
+      <span>已写入 <strong id="writtenFrames">0</strong> 帧</span>
+      <span>丢帧 <strong id="droppedFrames">0</strong></span>
+      <span>实际帧率 <strong id="actualFps">0.0</strong> FPS</span>
+    </section>
+
+    <aside id="recordingsPanel" class="recordings-panel" hidden>
+      <div class="panel-head">
+        <h2>录像列表</h2>
+        <div>
+          <button id="refreshRecordings" type="button">刷新</button>
+          <button id="closeRecordings" type="button" aria-label="关闭录像列表">关闭</button>
+        </div>
+      </div>
+      <div id="recordingsList" class="recordings-list"></div>
+      <video id="playback" controls playsinline preload="metadata" hidden></video>
+    </aside>
+
+    <footer class="action-bar">
+      <button id="startRecording" class="primary" type="button">开始录像</button>
+      <button id="stopRecording" class="danger" type="button">停止录像</button>
+      <button id="showRecordings" type="button">录像列表</button>
+    </footer>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

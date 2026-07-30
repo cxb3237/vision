@@ -1,0 +1,71 @@
+Environment: Windows 11 host, PowerShell, WSL bash available
+Date: 2026-07-30 Asia/Shanghai
+
+COMMAND: python -m compileall -q .
+RESULT: PASS (exit 0, no output)
+
+COMMAND: python -m pytest -q -rs
+RESULT: PASS (exit 0)
+........................................................................ [ 28%]
+........................................................................ [ 57%]
+................................................ss...................... [ 85%]
+....................................                                     [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests/test_touch_javascript.py:17: 当前环境没有Node.js，跳过纯JavaScript状态机测试
+SKIPPED [1] tests/test_touch_javascript.py:41: 浏览器几何测试需设置RUN_TOUCH_PLAYWRIGHT_TESTS=1显式启用
+250 passed, 2 skipped in 7.32s
+
+NOTE: The pytest process uses the system Python and therefore does not discover
+the Codex-bundled Node executable. JavaScript checks were run explicitly below.
+
+COMMAND: bundled-node --check web_debug/static/app.js
+RESULT: PASS (exit 0)
+
+COMMAND: bundled-node --check web_debug/static/control_scheduler.js
+RESULT: PASS (exit 0)
+
+COMMAND: bundled-node --check web_competition/app.js
+RESULT: PASS (exit 0)
+
+COMMAND: bundled-node --test tests/js/*.test.js
+RESULT: PASS (exit 0)
+✔ 不同参数的debounce和已发送请求互不取消
+✔ 同一参数快速变化只发送最新值
+✔ 已发送旧值的延迟响应不能覆盖更新目标
+✔ 恢复基准会取消尚未发送的编辑
+✔ 已完成等待同步阶段可区分
+✔ 触摸手势达到阈值后才锁定方向
+✔ 步进取整以minimum为基准且不会累积浮点误差
+✔ 可写过滤隐藏不支持只读和无效范围
+✔ 中文名称和枚举显示不改变原始值
+✔ 自动模式根据choices语义判断并保留原始枚举
+tests 17; pass 10; skipped 7; fail 0
+The seven skipped tests require a Playwright Chromium executable. Their source
+covers status combinations, 800x480/1024x600/1280x720/1280x800/1920x1080/
+720x1280 geometry, fixed controls, touch gestures and camera drawer isolation.
+
+COMMAND: bash -n deploy/install_tablet_web.sh
+RESULT: PASS (exit 0)
+COMMAND: bash -n deploy/uninstall_tablet_web.sh
+RESULT: PASS (exit 0)
+COMMAND: bash -n deploy/hotspot/install_hotspot.sh
+RESULT: PASS (exit 0)
+COMMAND: bash -n deploy/hotspot/uninstall_hotspot.sh
+RESULT: PASS (exit 0)
+COMMAND: bash -n deploy/hotspot/hotspot_healthcheck.sh
+RESULT: PASS (exit 0)
+
+COMMAND: git diff --check
+RESULT: PASS (exit 0, no output)
+
+COMMAND: nginx -t
+RESULT: NOT RUN - nginx is not installed in the Windows/WSL test environment.
+
+COMMAND: systemd-analyze verify deploy/systemd/cxb-hotspot.service deploy/systemd/camera-debug-web.service
+RESULT: ENVIRONMENT BLOCKED. The command exists in WSL, but source units contain
+installation-time @PROJECT_DIR@/@USER@ placeholders and WSL lacks Raspberry Pi
+nmcli and deployed executable paths. It therefore cannot validate final installed
+units here. Static unit/deployment tests passed; run verify after installation on Pi.
+
+COMMAND: git diff --check (after report generation)
+RESULT: PASS (see final execution record in REPORT.md)

@@ -1,0 +1,24 @@
+server:
+  host: 127.0.0.1
+  port: 8765
+
+preview:
+  max_fps: 10
+  jpeg_quality: 80
+  max_width: 960
+
+startup:
+  restore_runtime_overrides: true
+  competition_mode: false
+
+ui:
+  status_poll_interval_ms: 250
+  parameter_debounce_ms: 150
+  exit_competition_hold_ms: 3000
+
+runtime:
+  directory: runtime
+  camera_override_file: runtime/camera_override.yaml
+  ui_state_file: runtime/touch_ui_state.yaml
+  backup_directory: runtime/backups
+  backup_limit: 5

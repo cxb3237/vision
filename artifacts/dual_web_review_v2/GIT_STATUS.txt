@@ -1,0 +1,61 @@
+ M .gitignore
+ M README.md
+ M app.py
+ M core/vision_runtime.py
+ M deploy/install_touch_ui.sh
+ D deploy/start_kiosk.sh
+ M deploy/uninstall_touch_ui.sh
+ D deploy/vision-touch-kiosk.desktop.template
+ M tests/js/control_scheduler.test.js
+ M tests/js/touch_layout.test.js
+ D tests/test_kiosk_exit.py
+ D tests/test_kiosk_script_runtime.py
+ M tests/test_touch_deploy.py
+ M tests/test_touch_frontend.py
+ M tests/test_vision_runtime.py
+ M tests/touch_ui_fixture_server.py
+ D touch_ui/kiosk.py
+ M touch_ui/server.py
+ D touch_ui_web/app.js
+ D touch_ui_web/assets/.gitkeep
+ D touch_ui_web/control_scheduler.js
+ D touch_ui_web/index.html
+ D touch_ui_web/style.css
+?? competition_ui/__init__.py
+?? competition_ui/api.py
+?? competition_ui/media_service.py
+?? competition_ui/models.py
+?? competition_ui/recorder.py
+?? competition_ui/server.py
+?? config/competition_ui.yaml
+?? deploy/__init__.py
+?? deploy/hotspot/__init__.py
+?? deploy/hotspot/configure.py
+?? deploy/hotspot/hotspot_healthcheck.sh
+?? deploy/hotspot/install_hotspot.sh
+?? deploy/hotspot/uninstall_hotspot.sh
+?? deploy/install_tablet_web.sh
+?? deploy/nginx/camera-tablet.conf.template
+?? deploy/systemd/camera-debug-web.service
+?? deploy/systemd/cxb-hotspot.service
+?? deploy/uninstall_tablet_web.sh
+?? tests/test_competition_api.py
+?? tests/test_competition_config.py
+?? tests/test_competition_frontend.py
+?? tests/test_competition_media.py
+?? tests/test_competition_recording.py
+?? tests/test_competition_server.py
+?? tests/test_debug_web.py
+?? tests/test_hotspot_config.py
+?? tests/test_vision_runtime_preview_integration.py
+?? web_competition/app.js
+?? web_competition/index.html
+?? web_competition/style.css
+?? web_debug/README.md
+?? web_debug/__init__.py
+?? web_debug/server.py
+?? web_debug/static/app.js
+?? web_debug/static/assets/.gitkeep
+?? web_debug/static/control_scheduler.js
+?? web_debug/static/index.html
+?? web_debug/static/style.css

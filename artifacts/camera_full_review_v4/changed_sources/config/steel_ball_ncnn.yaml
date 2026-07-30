@@ -1,0 +1,9 @@
+backend: ncnn
+model_path: models/steel_ball/best_ncnn_model
+imgsz: 416
+conf_threshold: 0.40
+iou_threshold: 0.60
+max_det: 30
+num_threads: 4
+target_class: 100
+debug_tensor_shapes: false

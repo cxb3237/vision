@@ -1,0 +1,24 @@
+enabled: true
+
+server:
+  host: 127.0.0.1
+  port: 8000
+
+preview:
+  max_fps: 10
+  jpeg_quality: 72
+  max_width: 960
+
+recording:
+  directory: data/recordings/competition
+  fps: 30
+  queue_size: 12
+  minimum_free_space_mb: 512
+  filename_prefix: H
+  codec_candidates:
+    - avc1
+    - H264
+    - mp4v
+
+ui:
+  status_poll_interval_ms: 500

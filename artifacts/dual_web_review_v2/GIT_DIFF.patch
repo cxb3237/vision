@@ -1,0 +1,2951 @@
+diff --git a/.gitignore b/.gitignore
+index 46c45b0291c8335c48b36b3daa68d1478d5e2eeb..af91a9071d31f89a38a0d325d7903b2aa39876ff 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -20,6 +20,11 @@ artifacts/camera_cleanup_review*.zip
+ artifacts/camera_full_review*/
+ artifacts/camera_full_review*.zip
+ artifacts/steel_ball_ncnn_offline/
++artifacts/tablet_debug_hotspot_review/
++artifacts/tablet_debug_hotspot_review.zip
++artifacts/dual_web_review_v2/
++artifacts/dual_web_review_v2.zip
++data/recordings/**
+ *.mp4
+ *.avi
+ *.log
+diff --git a/README.md b/README.md
+index 85e08a5c5b529706840f08abbec6e6f03def812e..55d7af0538c93076d3f2e13a253e92b87e8587e2 100644
+--- a/README.md
++++ b/README.md
+@@ -12,11 +12,13 @@ CameraService (latest frame)
+   -> BallUartClient (latest-only)
+   -> MSPM0
+ 
+-Touch UI <- 状态快照 / 最新 JPEG <- VisionRuntime
+-Touch UI -> Python API -> 运行时命令队列
++VisionRuntime -> 127.0.0.1:8765（原有状态、画面与控制 API）
++camera-debug-web.service -> 127.0.0.1:8081（静态页面与白名单代理）
++Nginx 192.168.50.1:8080 -> 平板调试网站
++Nginx 192.168.50.1:80   -> 比赛图传、录像、回放与下载网站
+ ```
+ 
+-网页不会使用 Web Serial，也不会直接打开串口。摄像头、NCNN、网页和 UART 均由同一个 Python 进程协调；摄像头始终只有一个 `CameraService` 实例。
++网页不会使用 Web Serial，也不会直接打开串口。摄像头、NCNN 和 UART 仍只由原有视觉主进程协调，摄像头始终只有一个 `CameraService` 实例。独立调试站只代理原有本机接口，不打开摄像头、不加载第二份 NCNN 模型，也不接触 UART。热点、调试站和 Nginx 都是新增的独立服务；它们失败不会级联停止视觉主服务。
+ 
+ ## 接线与串口参数
+ 
+@@ -142,18 +144,65 @@ python3 -m tools.camera_profile_check --device 0 --camera-config config/camera.y
+ 
+ 网页具有比赛模式和停止程序等控制接口，因此服务端只接受 `127.0.0.1`、`localhost` 或 `::1`，不会监听 `0.0.0.0` 或局域网/公网地址。HTTP 请求体上限为 64 KiB。
+ 
+-## systemd 与 kiosk
++## 平板热点与固定网站
++
++Raspberry Pi 使用 NetworkManager 创建固定热点：
++
++- 热点名称：`cxb`
++- 热点密码：`123@chenzi`
++- 无线接口：`wlan0`
++- 树莓派地址：`192.168.50.1/24`
++- 比赛网站：[http://192.168.50.1/](http://192.168.50.1/)
++- 调试网站：[http://192.168.50.1:8080/](http://192.168.50.1:8080/)
++
++TCP 80 的比赛网站提供实时摄像头画面、录像状态与计时、文件名、写入/丢弃帧数、实际帧率、剩余空间，以及录像开始、停止、列表、浏览器 Range 回放和下载。比赛页不提供摄像头参数、UART、位置下发、模型或系统控制。录像复用视觉主进程唯一的 `CameraService`，按 `FramePacket.capture_timestamp` 重采样到容器帧率；输入偏慢时复制最近帧、偏快时丢弃多余帧，从而使视频时长接近真实经过时间。
++
++调试站使用顶部关键状态、可滚动详细信息和固定底部操作栏；在 1024×600、1280×800 和 1920×1080 横屏下，“摄像头参数”和“启用/停止位置下发”始终可见。主状态只有在已请求输出、UART 在线、MCU READY 且 `position_tx_hz > 0` 时才显示“位置下发运行中”。未标定时前端禁用“启用位置下发”，后端也会拒绝该操作。
++
++在树莓派工程根目录安装：
++
++```bash
++sudo apt install network-manager nginx
++sudo bash deploy/install_tablet_web.sh --user "$USER" --project-dir "$PWD"
++```
++
++安装脚本会幂等更新唯一的 `cxb-hotspot` 连接，删除旧的 `~/.config/autostart/vision-touch-kiosk.desktop`，安装 `cxb-hotspot.service`、`camera-debug-web.service` 和专用 Nginx 路由，并在启动前执行 `nginx -t`。本工程专用的 `nginx.service.d/camera-tablet-hotspot.conf` 声明 `After=`/`Wants=cxb-hotspot.service`，避免 Nginx 在 `192.168.50.1` 尚未配置时过早绑定失败；卸载脚本只删除这一 drop-in，不修改系统原始 `nginx.service`。
++
++`config/competition_ui.yaml` 默认 `enabled: true`。原有 `vision-touch.service` 的 ExecStart 完全不变：`app.py --touch-ui` 会在同一进程内自动启动仅监听 `127.0.0.1:8000` 的比赛后端，并复用唯一摄像头。比赛后端、录像目录或 Nginx 故障只记录错误，不会停止视觉识别、UART或位置控制主链路。
++
++树莓派不再开机自动打开 Chromium，也不再需要桌面自动登录、显示器或本地 kiosk。平板连接 Wi-Fi `cxb`，输入密码 `123@chenzi`，然后用 Chrome/Edge 打开上述固定地址即可。
++
++查看状态和日志：
+ 
+ ```bash
+-sudo bash deploy/install_touch_ui.sh --user "$USER" --project-dir "$PWD" --start
+ systemctl status vision-touch.service
+ journalctl -u vision-touch.service -f
++systemctl status cxb-hotspot.service camera-debug-web.service nginx.service
++journalctl -u cxb-hotspot.service -u camera-debug-web.service -u nginx.service -f
+ ```
+ 
+-浏览器 kiosk 使用项目专用 profile，只访问本机 URL。退出 kiosk 不会停止视觉后端；需要重新打开时运行：
++手动重启新增服务：
+ 
+ ```bash
+-deploy/start_kiosk.sh &
++sudo systemctl restart cxb-hotspot.service
++sudo systemctl restart camera-debug-web.service
++sudo systemctl restart nginx.service
++```
++
++只卸载本次新增的热点、调试站和 Nginx 路由：
++
++```bash
++sudo bash deploy/uninstall_tablet_web.sh --user "$USER" --project-dir "$PWD"
++```
++
++卸载不会删除视觉主服务、工程、模型、录像、其他 Wi-Fi 连接或其他 Nginx 网站。
++
++原有视觉主服务若尚未安装，仍使用原安装命令：
++
++```bash
++sudo bash deploy/install_touch_ui.sh --user "$USER" --project-dir "$PWD" --start
++systemctl status vision-touch.service
++journalctl -u vision-touch.service -f
+ ```
+ 
+ ## 常见故障
+@@ -165,17 +214,33 @@ deploy/start_kiosk.sh &
+ - PING 有回复但不发位置：确认网页已启用位置下发、MCU READY、标定状态有效，且检测到了钢球。
+ - 没识别到球：检查模型是否加载、画面曝光、摄像头视野以及网页中的识别错误。
+ - 反向运动：切换 `servo_side`，不要交换毫米端点来掩盖安装方向。
++- 平板找不到 `cxb`：检查 `systemctl status NetworkManager cxb-hotspot.service` 和 `journalctl -u cxb-hotspot.service`，确认 `wlan0` 存在且未被其他热点或客户端连接占用。
++- 热点密码错误：忘记旧网络后重新连接，密码严格为 `123@chenzi`。
++- 能连热点但网页打不开：先 `ping 192.168.50.1`，再检查 `systemctl status nginx camera-debug-web`；客户端应关闭移动网络代理/VPN 后重试。
++- `192.168.50.1` 不通：运行 `ip address show wlan0`，应看到 `192.168.50.1/24`；再运行 `deploy/hotspot/hotspot_healthcheck.sh`。
++- TCP 80 不通：检查 `vision-touch.service` 中的比赛后端日志、`curl http://127.0.0.1:8000/healthz` 和 Nginx；8000 是内部端口，不应从平板直接访问。
++- TCP 80 正常但 8080 不通：检查 `camera-debug-web.service` 以及 `curl http://127.0.0.1:8081/debug/healthz`。8081 和 8765 都是内部端口，不应从平板直接访问。
++- 调试页显示“视觉主服务未连接”：检查 `vision-touch.service`；代理会继续运行，视觉主服务恢复后页面会自动恢复轮询。
++- 摄像头画面不刷新：先确认视觉主服务在线，再检查 `/api/preview.mjpg` 和摄像头日志；不要启动第二个采集程序。
++- NetworkManager 未运行：执行 `sudo systemctl enable --now NetworkManager` 后重新启动 `cxb-hotspot.service`。
+ 
+ ## 测试
+ 
+ ```bash
+ python -m compileall -q .
+-python -m pytest -q
++python -m pytest -q -rs
+ python -m tools.touch_ui_selftest
+-node --check touch_ui_web/app.js
+-node --check touch_ui_web/control_scheduler.js
++node --check web_debug/static/app.js
++node --check web_debug/static/control_scheduler.js
++node --check web_competition/app.js
++node --test tests/js/*.test.js
++bash -n deploy/install_tablet_web.sh
++bash -n deploy/uninstall_tablet_web.sh
++bash -n deploy/hotspot/install_hotspot.sh
++bash -n deploy/hotspot/uninstall_hotspot.sh
++bash -n deploy/hotspot/hotspot_healthcheck.sh
+ ```
+ 
+-Windows 可导入全部生产模块并运行无硬件测试；V4L2、串口、systemd 和 kiosk 测试均使用 mock 或静态检查。真实摄像头、真实 UART 电气连接、MCU 复位恢复、实际位置发送频率和树莓派 kiosk 必须在 Raspberry Pi 5 上现场验证。
++Windows 可导入全部生产模块并运行无硬件测试；V4L2、串口、NetworkManager、systemd 和 Nginx 相关自动测试使用 mock 或静态检查。真实热点创建与重启恢复、DHCP、多型号平板连接、Nginx 绑定、实时 MJPEG、真实摄像头、UART 电气连接、MCU 复位恢复及实际位置发送频率必须在 Raspberry Pi 5 上现场验证。
+ 
+ 旧多检测器、旧二进制通信、训练数据和历史录制/标定工具已从部署工程移除；模型权重位于 `models/steel_ball/best_ncnn_model/`，本次清理不修改模型参数或二进制权重。
+diff --git a/app.py b/app.py
+index ceba9eb4cf3e449168048fe24310db257981f07b..3e24f35b035acd5e08f34cc59ecdd52f1ce8ca93 100644
+--- a/app.py
++++ b/app.py
+@@ -12,6 +12,8 @@ import threading
+ from typing import Any
+ 
+ import cv2
++from competition_ui.models import CompetitionUIConfig,CompetitionUIConfigError,load_competition_ui_config
++from competition_ui.server import CompetitionUIServer
+ 
+ from core.config_loader import ConfigError, load_camera_config, load_mission_config, load_steel_ball_ncnn_config
+ from core.vision_runtime import VisionRuntime
+@@ -42,6 +44,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
+     parser.add_argument("--touch-ui", action="store_true", help="启动本地触摸网页")
+     parser.add_argument("--touch-host", default=None, help="覆盖网页监听地址")
+     parser.add_argument("--touch-port", type=int, default=None, help="覆盖网页监听端口")
++    parser.add_argument("--competition-ui", action="store_true")
++    parser.add_argument("--competition-config", default="config/competition_ui.yaml")
++    parser.add_argument("--competition-host", default=None)
++    parser.add_argument("--competition-port", type=int, default=None)
+     parser.add_argument("--headless", action="store_true", help="禁止 OpenCV 窗口")
+     parser.add_argument("--serial-port", help="覆盖 UART 设备并启用 UART")
+     parser.add_argument("--baudrate", type=int, help="覆盖 UART 波特率")
+@@ -60,6 +66,10 @@ def validate_ui_arguments(args: argparse.Namespace) -> None:
+         raise ConfigError("--touch-port 必须在 1..65535 范围内")
+     if args.touch_host is not None and not args.touch_host.strip():
+         raise ConfigError("--touch-host 不能为空")
++    if args.competition_port is not None and not 1 <= args.competition_port <= 65535:
++        raise ConfigError("--competition-port 必须在 1..65535 范围内")
++    if args.competition_host is not None and not args.competition_host.strip():
++        raise ConfigError("--competition-host 不能为空")
+ 
+ 
+ def resolve_touch_ui_config(args: argparse.Namespace, *, project_root: str | Path | None = None) -> TouchUIConfig:
+@@ -86,6 +96,20 @@ def configure_touch_logging(log_path: str | Path = "logs/touch_ui.log") -> None:
+     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+     root.addHandler(handler)
+ 
++def resolve_competition_ui_config(
++    args: argparse.Namespace,
++    *,
++    project_root: str | Path | None = None,
++) -> CompetitionUIConfig:
++    config = load_competition_ui_config(args.competition_config, project_root=project_root)
++    host = config.host if args.competition_host is None else args.competition_host.strip()
++    port = config.port if args.competition_port is None else args.competition_port
++    if host != "127.0.0.1":
++        raise ConfigError("比赛后端只允许监听 127.0.0.1")
++    if not 1 <= port <= 65535:
++        raise ConfigError("比赛网页 port 必须在 1..65535 范围内")
++    return replace(config, host=host, port=port)
++
+ 
+ def resolve_ball_uart_settings(args: argparse.Namespace, mission: dict[str, Any]) -> dict[str, Any]:
+     profile = mission["ball_uart"]
+@@ -138,6 +162,7 @@ def run_application(
+     *,
+     camera_config: Any = None,
+     touch_config: TouchUIConfig | None = None,
++    competition_config: CompetitionUIConfig | None = None,
+     initial_competition_mode: bool = False,
+ ) -> int:
+     tracker = TargetTracker(
+@@ -156,9 +181,16 @@ def run_application(
+         display_handler=_handle_display,
+         camera_config=camera_config,
+         touch_config=touch_config,
++        competition_config=competition_config,
+         initial_competition_mode=initial_competition_mode,
+     )
+     web = TouchUIServer(runtime, touch_config) if touch_config else None
++    competition_web = None
++    if competition_config is not None:
++        try:
++            competition_web = CompetitionUIServer(runtime, competition_config)
++        except Exception:
++            LOG.exception("比赛网页初始化失败；视觉识别、UART和调试网页继续运行")
+     old_signals: dict[int, Any] = {}
+     if threading.current_thread() is threading.main_thread():
+         for signum in (signal.SIGINT, signal.SIGTERM):
+@@ -166,9 +198,17 @@ def run_application(
+     try:
+         runtime.start()
+         if web:
+-            web.start()
++            try:web.start()
++            except OSError:LOG.exception("调试网页启动失败；其他服务继续")
++        if competition_web:
++            try:
++                competition_web.start()
++            except Exception:
++                LOG.exception("比赛网页启动失败；视觉识别、UART和调试网页继续运行")
+         return runtime.run_forever()
+     finally:
++        if competition_web:
++            competition_web.stop()
+         if web:
+             web.stop()
+         if getattr(runtime, "_started", False):
+@@ -186,10 +226,22 @@ def main(argv: list[str] | None = None) -> int:
+         mission = load_mission_config(args.mission_config)
+         camera_config = load_camera_config(args.camera_config)
+         touch_config = None
++        competition_config = None
+         if args.touch_ui:
+             args.headless = True
+             touch_config = resolve_touch_ui_config(args)
+             configure_touch_logging()
++        if args.competition_ui:
++            args.headless = True
++            competition_config = resolve_competition_ui_config(args)
++        elif args.touch_ui:
++            try:
++                automatic_competition_config = resolve_competition_ui_config(args)
++                if automatic_competition_config.enabled:
++                    competition_config = automatic_competition_config
++                    LOG.info("触摸模式已按配置自动启用比赛网站后端")
++            except (CompetitionUIConfigError, ConfigError, OSError):
++                LOG.exception("比赛网站配置加载失败；视觉识别、UART和调试网页继续运行")
+         detector = create_detector(args.steel_ball_ncnn_config)
+         camera = CameraService(camera_config)
+         uart_settings = resolve_ball_uart_settings(args, mission)
+@@ -202,9 +254,10 @@ def main(argv: list[str] | None = None) -> int:
+             uart,
+             camera_config=camera_config,
+             touch_config=touch_config,
++            competition_config=competition_config,
+             initial_competition_mode=bool(args.competition_mode),
+         )
+-    except (ConfigError, TouchUIConfigError, ValueError, OSError) as exc:
++    except (ConfigError,TouchUIConfigError,CompetitionUIConfigError,ValueError,OSError) as exc:
+         LOG.error("启动失败: %s", exc)
+         return 2
+     except Exception:
+diff --git a/core/vision_runtime.py b/core/vision_runtime.py
+index 96c7d1c594f1170955284ec7540baa68496d6a95..22883e354360ab131dbef1474b2b9aaf5e2b6001 100644
+--- a/core/vision_runtime.py
++++ b/core/vision_runtime.py
+@@ -10,6 +10,8 @@ import threading
+ import time
+ from types import MappingProxyType
+ from typing import Any, Callable
++from competition_ui.media_service import CompetitionMediaService
++from competition_ui.models import CompetitionUIConfig
+ 
+ from core.models import CameraConfig, VisionResult
+ from core.performance_metrics import RollingRate, RollingSamples
+@@ -73,6 +75,7 @@ class VisionRuntime:
+         display_handler: Callable[[Any, Any, VisionResult], tuple[bool, Any]],
+         camera_config: CameraConfig | None = None,
+         touch_config: TouchUIConfig | None = None,
++        competition_config: CompetitionUIConfig | None = None,
+         initial_competition_mode: bool = False,
+         command_queue_size: int = 64,
+     ) -> None:
+@@ -85,6 +88,7 @@ class VisionRuntime:
+         self.display_handler = display_handler
+         self.camera_config = camera_config
+         self.touch_config = touch_config
++        self.competition_config = competition_config
+         self.command_queue = RuntimeCommandQueue(command_queue_size)
+         self.persistence = RuntimeConfigStore(touch_config) if touch_config else None
+         self.frame_stream = LatestFrameStream(
+@@ -92,12 +96,18 @@ class VisionRuntime:
+             jpeg_quality=touch_config.jpeg_quality if touch_config else 80,
+             max_width=touch_config.preview_max_width if touch_config else 960,
+         )
++        self.competition_media_service = (
++            CompetitionMediaService(camera_service, competition_config)
++            if competition_config
++            else None
++        )
+         self._stop_event = threading.Event()
+         self._lifecycle_lock = threading.Lock()
+         self._started = False
+         self._camera_started = False
+         self._uart_started = False
+         self._preview_started = False
++        self._competition_media_started = False
+         self._last_frame_id: int | None = None
+         self._vision_rate = RollingRate(window_seconds=2.0, max_events=512)
+         self._capture_to_result = RollingSamples(max_samples=120)
+@@ -216,6 +226,14 @@ class VisionRuntime:
+                 if self.touch_config:
+                     self.frame_stream.start()
+                     self._preview_started = True
++                if self.competition_media_service:
++                    try:
++                        self.competition_media_service.start()
++                        self._competition_media_started = True
++                    except Exception:
++                        LOG.exception(
++                            "比赛媒体服务启动失败；视觉识别、UART和调试网页继续运行"
++                        )
+                 if self.state_store.snapshot()["competition_mode"]:
+                     self.ball_uart.discard_pending_ball_position()
+                     self.ball_uart.send_start()
+@@ -235,6 +253,12 @@ class VisionRuntime:
+             self._stop_resources()
+ 
+     def _stop_resources(self) -> None:
++        if self._competition_media_started:
++            try:
++                self.competition_media_service.stop()
++            except Exception:
++                LOG.exception("比赛媒体服务停止时发生错误")
++            self._competition_media_started = False
+         if self._preview_started:
+             self.frame_stream.stop()
+             self._preview_started = False
+@@ -328,6 +352,10 @@ class VisionRuntime:
+ 
+     def _set_competition(self, enabled: bool) -> None:
+         if enabled:
++            calibration = self.state_store.snapshot()
++            if not calibration.get("ball_position_calibrated", False):
++                reason = calibration.get("ball_position_calibration_error") or "位置尚未标定"
++                raise RuntimeError(f"未标定，禁止启用位置下发：{reason}")
+             self.ball_uart.discard_pending_ball_position()
+             self.state_store.update(competition_mode=True, vision_output_enabled=True)
+             self.ball_uart.send_start()
+@@ -404,7 +432,8 @@ class VisionRuntime:
+             latest_frame_age_s=float(latest_frame_age) if age_is_valid else None,
+             camera_fps=float(camera.get("actual_fps", 0.0)),
+             uart_port_open=bool(uart.get("connected")),
+-            serial_online=bool(uart.get("connected")) and bool(uart.get("mcu_ready")),
++            # UART transport availability and MCU readiness are distinct states.
++            serial_online=bool(uart.get("connected")),
+             mcu_ready=bool(uart.get("mcu_ready")),
+             uart_state=uart.get("uart_state", "串口未打开"),
+             mcu_status=uart.get("mcu_status", {}),
+@@ -479,7 +508,7 @@ class VisionRuntime:
+                 if self._preview_started or (bool(getattr(self.args, "display", False)) and not bool(getattr(self.args, "headless", False))):
+                     annotated = self.detector.draw_debug(frame.image, result)
+                 if self._preview_started and annotated is not None:
+-                    self.frame_stream.submit(annotated, frame.frame_id, now)
++                    self.frame_stream.submit_frame(annotated)
+                 if bool(getattr(self.args, "display", False)) and not bool(getattr(self.args, "headless", False)):
+                     keep_running, _ = self.display_handler(frame.image, self.detector, result)
+                     if not keep_running:
+diff --git a/deploy/install_touch_ui.sh b/deploy/install_touch_ui.sh
+index 70a585778f03cfa37f0925d81b11c4ca26353149..062bcbd895e1f61ddd1a2cd1da8be668d6215262 100644
+--- a/deploy/install_touch_ui.sh
++++ b/deploy/install_touch_ui.sh
+@@ -52,39 +52,6 @@ for module in serial cv2 yaml; do
+   fi
+ done
+ 
+-touch_settings="$({
+-  cd "$PROJECT_DIR"
+-  "$PROJECT_DIR/.venv/bin/python" - "$PROJECT_DIR" <<'PY'
+-from pathlib import Path
+-import sys
+-
+-from touch_ui.models import load_touch_ui_config
+-
+-project = Path(sys.argv[1])
+-config = load_touch_ui_config(
+-    project / "config/touch_ui.yaml",
+-    project_root=project,
+-    create_runtime=False,
+-)
+-if config.host not in {"localhost", "127.0.0.1", "::1"}:
+-    raise SystemExit("kiosk配置只允许回环地址")
+-print(config.host)
+-print(config.port)
+-PY
+-})" || exit $?
+-mapfile -t touch_values <<< "$touch_settings"
+-if [[ "${#touch_values[@]}" -ne 2 ]]; then
+-  echo "无法解析config/touch_ui.yaml中的host和port" >&2
+-  exit 8
+-fi
+-touch_host="${touch_values[0]}"
+-touch_port="${touch_values[1]}"
+-if [[ "$touch_host" == "::1" ]]; then
+-  touch_url="http://[::1]:${touch_port}"
+-else
+-  touch_url="http://${touch_host}:${touch_port}"
+-fi
+-
+ if [[ ! -e /dev/ttyAMA0 ]]; then
+   echo "提示：当前未发现/dev/ttyAMA0；服务仍会安装并由串口重连机制等待设备。" >&2
+ fi
+@@ -92,24 +59,17 @@ fi
+ escape_sed() { printf '%s' "$1" | sed 's/[&|]/\\&/g'; }
+ escaped_user="$(escape_sed "$USER_NAME")"
+ escaped_project="$(escape_sed "$PROJECT_DIR")"
+-escaped_touch_url="$(escape_sed "$touch_url")"
+ sed -e "s|@USER@|$escaped_user|g" -e "s|@PROJECT_DIR@|$escaped_project|g" \
+   "$PROJECT_DIR/deploy/vision-touch.service.template" \
+   > /etc/systemd/system/vision-touch.service
+ 
+ user_home="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+-autostart_dir="$user_home/.config/autostart"
+-install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" "$autostart_dir"
+-sed -e "s|@PROJECT_DIR@|$escaped_project|g" \
+-  -e "s|@TOUCH_URL@|$escaped_touch_url|g" \
+-  "$PROJECT_DIR/deploy/vision-touch-kiosk.desktop.template" \
+-  > "$autostart_dir/vision-touch-kiosk.desktop"
+-chown "$USER_NAME:$USER_NAME" "$autostart_dir/vision-touch-kiosk.desktop"
+-chmod +x "$PROJECT_DIR/deploy/start_kiosk.sh"
++# 升级时主动删除旧版本本机浏览器自启动残留。
++rm -f -- "$user_home/.config/autostart/vision-touch-kiosk.desktop"
+ usermod -aG video,dialout "$USER_NAME"
+ systemctl daemon-reload
+ systemctl enable vision-touch.service
+ if [[ "$START_NOW" -eq 1 ]]; then
+   systemctl restart vision-touch.service
+ fi
+-echo "安装完成。组权限需重新登录后生效；桌面kiosk需要为该用户启用图形桌面自动登录。"
++echo "视觉主服务安装完成。组权限需重新登录后生效；本机浏览器自启动已移除。"
+diff --git a/deploy/start_kiosk.sh b/deploy/start_kiosk.sh
+deleted file mode 100644
+index 1da3ee9577b1c297c650ea030ec0ffb2031ecccb..0000000000000000000000000000000000000000
+--- a/deploy/start_kiosk.sh
++++ /dev/null
+@@ -1,140 +0,0 @@
+-#!/usr/bin/env bash
+-set -u
+-
+-VISION_TOUCH_URL="${VISION_TOUCH_URL:-http://127.0.0.1:8765}"
+-TIMEOUT_SECONDS="${VISION_KIOSK_TIMEOUT:-60}"
+-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+-PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+-RUNTIME_DIR="$PROJECT_DIR/runtime"
+-PID_FILE="$RUNTIME_DIR/kiosk.pid"
+-EXIT_REQUESTED="$RUNTIME_DIR/kiosk.exit_requested"
+-CHROME_PROFILE="$RUNTIME_DIR/chrome-profile"
+-MAX_RESTARTS="${VISION_KIOSK_MAX_RESTARTS:-5}"
+-RESTART_DELAY="${VISION_KIOSK_RESTART_DELAY:-2}"
+-
+-mkdir -p "$RUNTIME_DIR"
+-rm -f -- "$EXIT_REQUESTED"
+-
+-url_address="${VISION_TOUCH_URL#http://}"
+-url_host=""
+-url_port=""
+-if [[ "$VISION_TOUCH_URL" == http://* && "$url_address" =~ ^(127\.0\.0\.1|localhost):([0-9]+)$ ]]; then
+-  url_host="${BASH_REMATCH[1]}"
+-  url_port="${BASH_REMATCH[2]}"
+-elif [[ "$VISION_TOUCH_URL" == http://* && "$url_address" =~ ^\[::1\]:([0-9]+)$ ]]; then
+-  url_host="::1"
+-  url_port="${BASH_REMATCH[1]}"
+-fi
+-if [[ -z "$url_host" ]] \
+-  || [[ ! "$url_port" =~ ^[0-9]+$ ]] \
+-  || ((10#$url_port < 1 || 10#$url_port > 65535)); then
+-  echo "VISION_TOUCH_URL仅允许本机回环HTTP地址和有效端口" >&2
+-  exit 3
+-fi
+-
+-if command -v chromium >/dev/null 2>&1; then
+-  BROWSER="$(command -v chromium)"
+-elif command -v chromium-browser >/dev/null 2>&1; then
+-  BROWSER="$(command -v chromium-browser)"
+-elif command -v google-chrome >/dev/null 2>&1; then
+-  BROWSER="$(command -v google-chrome)"
+-elif command -v google-chrome-stable >/dev/null 2>&1; then
+-  BROWSER="$(command -v google-chrome-stable)"
+-elif command -v firefox >/dev/null 2>&1; then
+-  BROWSER="$(command -v firefox)"
+-else
+-  echo "未找到Chromium、Chrome或Firefox" >&2
+-  exit 1
+-fi
+-
+-deadline=$((SECONDS + TIMEOUT_SECONDS))
+-until curl --fail --silent --max-time 2 "$VISION_TOUCH_URL/healthz" >/dev/null; do
+-  if (( SECONDS >= deadline )); then
+-    echo "等待触摸服务超时：$VISION_TOUCH_URL/healthz" >&2
+-    exit 2
+-  fi
+-  sleep 1
+-done
+-
+-browser_pid=""
+-if [[ ! "$MAX_RESTARTS" =~ ^[0-9]+$ ]] || [[ ! "$RESTART_DELAY" =~ ^[0-9]+$ ]]; then
+-  echo "VISION_KIOSK_MAX_RESTARTS和VISION_KIOSK_RESTART_DELAY必须为非负整数" >&2
+-  exit 5
+-fi
+-
+-cleanup_pid() {
+-  if [[ -n "$browser_pid" && -f "$PID_FILE" ]]; then
+-    recorded_pid="$(tr -d '\r\n' < "$PID_FILE")"
+-    if [[ "$recorded_pid" =~ ^[0-9]+$ && "$recorded_pid" == "$browser_pid" ]]; then
+-      rm -f -- "$PID_FILE"
+-    fi
+-  fi
+-}
+-trap cleanup_pid EXIT
+-
+-stop_session() {
+-  if [[ "$browser_pid" =~ ^[0-9]+$ ]] && kill -0 "$browser_pid" 2>/dev/null; then
+-    kill -TERM "$browser_pid" 2>/dev/null || true
+-    wait "$browser_pid" 2>/dev/null || true
+-  fi
+-  cleanup_pid
+-  exit 0
+-}
+-trap stop_session INT TERM
+-
+-write_pid_atomically() {
+-  local pid="$1"
+-  local temporary
+-  temporary="$(mktemp "$RUNTIME_DIR/.kiosk.pid.XXXXXX")" || return 1
+-  printf '%s\n' "$pid" > "$temporary"
+-  chmod 0600 "$temporary"
+-  mv -f -- "$temporary" "$PID_FILE"
+-}
+-
+-echo "触摸服务已就绪，启动kiosk。维护菜单可安全退出浏览器或视觉服务。"
+-restart_count=0
+-while ((restart_count <= MAX_RESTARTS)); do
+-  browser_name="$(basename -- "$BROWSER")"
+-  if [[ "$browser_name" == "firefox" ]]; then
+-    "$BROWSER" --kiosk "$VISION_TOUCH_URL" &
+-  else
+-    mkdir -p "$CHROME_PROFILE"
+-    "$BROWSER" \
+-      --kiosk \
+-      --app="$VISION_TOUCH_URL" \
+-      --user-data-dir="$CHROME_PROFILE" \
+-      --no-first-run \
+-      --no-default-browser-check \
+-      --disable-session-crashed-bubble \
+-      --disable-features=Translate \
+-      --overscroll-history-navigation=0 \
+-      --disable-pinch &
+-  fi
+-  browser_pid="$!"
+-  if ! write_pid_atomically "$browser_pid"; then
+-    kill -TERM "$browser_pid" 2>/dev/null || true
+-    wait "$browser_pid" 2>/dev/null || true
+-    echo "无法原子写入kiosk PID文件" >&2
+-    exit 4
+-  fi
+-  wait "$browser_pid" 2>/dev/null
+-  browser_status="$?"
+-  cleanup_pid
+-  browser_pid=""
+-  if [[ -f "$EXIT_REQUESTED" ]]; then
+-    rm -f -- "$EXIT_REQUESTED"
+-    echo "已按维护菜单请求退出kiosk；下次桌面登录或手动执行脚本时可重新打开。"
+-    exit 0
+-  fi
+-  if [[ "$browser_status" -eq 0 || "$browser_status" -eq 130 || "$browser_status" -eq 143 ]]; then
+-    echo "kiosk浏览器已正常关闭；视觉后端继续运行。"
+-    exit 0
+-  fi
+-  restart_count=$((restart_count + 1))
+-  if ((restart_count > MAX_RESTARTS)); then
+-    echo "kiosk浏览器连续异常退出，已达到最大重试次数${MAX_RESTARTS}，停止重启。" >&2
+-    exit "$browser_status"
+-  fi
+-  echo "浏览器异常退出（code=$browser_status），${RESTART_DELAY}秒后进行第${restart_count}次重试。" >&2
+-  sleep "$RESTART_DELAY"
+-done
+diff --git a/deploy/uninstall_touch_ui.sh b/deploy/uninstall_touch_ui.sh
+index fcffd1603ce3e22ea8221c5c827638ab041907fc..b6c1e02563627371aa83594662949d0d4d8feed6 100644
+--- a/deploy/uninstall_touch_ui.sh
++++ b/deploy/uninstall_touch_ui.sh
+@@ -20,6 +20,6 @@ fi
+ systemctl disable --now vision-touch.service 2>/dev/null || true
+ rm -f /etc/systemd/system/vision-touch.service
+ user_home="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+-rm -f "$user_home/.config/autostart/vision-touch-kiosk.desktop"
++rm -f -- "$user_home/.config/autostart/vision-touch-kiosk.desktop"
+ systemctl daemon-reload
+-echo "vision-touch服务和kiosk自启动已移除；项目与runtime现场配置未删除。"
++echo "vision-touch服务已移除，并清理旧版浏览器自启动残留；项目与runtime现场配置未删除。"
+diff --git a/deploy/vision-touch-kiosk.desktop.template b/deploy/vision-touch-kiosk.desktop.template
+deleted file mode 100644
+index 240428d635266ef2e288a9b95d638a28733c7fc2..0000000000000000000000000000000000000000
+--- a/deploy/vision-touch-kiosk.desktop.template
++++ /dev/null
+@@ -1,6 +0,0 @@
+-[Desktop Entry]
+-Type=Application
+-Name=Vision Touch Kiosk
+-Exec=/usr/bin/env VISION_TOUCH_URL=@TOUCH_URL@ @PROJECT_DIR@/deploy/start_kiosk.sh
+-Terminal=false
+-X-GNOME-Autostart-enabled=true
+diff --git a/tests/js/control_scheduler.test.js b/tests/js/control_scheduler.test.js
+index 2970000f5117f2a6133bdf34394ad8558dcba071..bf0325037c770cbbdbf0aa46c5040fb4902ef4d5 100644
+--- a/tests/js/control_scheduler.test.js
++++ b/tests/js/control_scheduler.test.js
+@@ -11,7 +11,7 @@ const {
+   formatControlValue,
+   quantizeControlValue,
+   translateChoiceLabel,
+-} = require("../../touch_ui_web/control_scheduler.js");
++} = require("../../web_debug/static/control_scheduler.js");
+ 
+ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+ 
+diff --git a/tests/js/touch_layout.test.js b/tests/js/touch_layout.test.js
+index daec674667c9e3b8092d36a681c2ec741ded7767..0b838abb5743e089188b5c96306ea6f647252950 100644
+--- a/tests/js/touch_layout.test.js
++++ b/tests/js/touch_layout.test.js
+@@ -8,7 +8,9 @@ const path = require("node:path");
+ const {chromium} = require("playwright");
+ 
+ const ROOT = path.resolve(__dirname, "../..");
+-const WEB_ROOT = path.join(ROOT, "touch_ui_web");
++const WEB_ROOT = path.join(ROOT, "web_debug", "static");
++const browserExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath();
++const HAS_BROWSER = fs.existsSync(browserExecutable);
+ const baseControls = {
+   brightness: {supported: true, writable: true, type: "int", minimum: -64, maximum: 64, step: 1, requested: 0, actual: 0, mismatch: false},
+   contrast: {supported: true, writable: true, type: "int", minimum: 0, maximum: 64, step: 1, requested: 16, actual: 16, mismatch: false},
+@@ -39,6 +41,11 @@ function createServer({patchFailure = false, applyDelayMs = 0, controlOverrides
+     nextCommand: 1,
+     competitionMode: false,
+     visionOutputEnabled: false,
++    serialOnline: true,
++    mcuReady: true,
++    positionTxHz: 0,
++    ballXmm: null,
++    uartState: "STOPPED",
+   };
+   Object.entries(controlOverrides).forEach(([name, override]) => {
+     state.controls[name] = {...state.controls[name], ...override};
+@@ -52,7 +59,7 @@ function createServer({patchFailure = false, applyDelayMs = 0, controlOverrides
+           delete command.appliedAt;
+         }
+       });
+-      json(response, {ok: true, status: {runtime_running: true, camera_online: true, mcu_ready: true, serial_online: true, position_tx_count: 3, detector: "steel_ball_yolo_ncnn", state: "LOCKED", fps: 30, competition_mode: state.competitionMode, vision_output_enabled: state.visionOutputEnabled, commands: state.commands, ui: {parameter_debounce_ms: 20}}});
++      json(response, {ok: true, status: {runtime_running: true, camera_online: true, mcu_ready: state.mcuReady, serial_online: state.serialOnline, position_tx_count: 3, position_tx_hz: state.positionTxHz, ball_x_mm: state.ballXmm, uart_state: state.uartState, detector: "steel_ball_yolo_ncnn", state: "LOCKED", fps: 30, competition_mode: state.competitionMode, vision_output_enabled: state.visionOutputEnabled, commands: state.commands, ui: {parameter_debounce_ms: 20}}});
+       return;
+     }
+     if (pathname === "/api/config/camera") {
+@@ -101,11 +108,10 @@ function intersects(first, second) {
+ }
+ 
+ function launchBrowser() {
+-  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+-  return chromium.launch({headless: true, ...(executablePath ? {executablePath} : {})});
++  return chromium.launch({headless: true, executablePath: browserExecutable});
+ }
+ 
+-test("vision output status is independent from UART online state", {timeout: 30000}, async (context) => {
++test("vision output status is independent from UART online state", {timeout: 30000, skip: !HAS_BROWSER}, async (context) => {
+   const server = createServer();
+   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+   const browser = await launchBrowser();
+@@ -116,13 +122,22 @@ test("vision output status is independent from UART online state", {timeout: 300
+   const page = await browser.newPage({viewport: {width: 800, height: 480}});
+   await page.goto(`http://127.0.0.1:${server.address().port}/`, {waitUntil: "domcontentloaded"});
+   await page.waitForFunction(() => document.querySelector("#competitionBadge").textContent.includes("调试识别"));
+-  assert.equal(await page.locator("#serialBadge").innerText(), "UART ONLINE");
+-  assert.equal(await page.locator("#competitionBadge").innerText(), "调试识别 · 不下发控制");
++  assert.equal(await page.locator("#serialBadge").innerText(), "串口在线");
++  assert.equal(await page.locator("#competitionBadge").innerText(), "调试识别");
++  assert.equal(await page.locator("#positionTxBadge").innerText(), "已停止");
+ 
+   server.fixtureState.competitionMode = true;
+   server.fixtureState.visionOutputEnabled = true;
++  server.fixtureState.positionTxHz = 20;
++  server.fixtureState.ballXmm = 10;
+   await page.waitForFunction(() => document.querySelector("#competitionBadge").textContent.includes("比赛识别有效"));
+-  assert.equal(await page.locator("#competitionBadge").innerText(), "比赛识别有效 · 正在向小车发送");
++  assert.equal(await page.locator("#competitionBadge").innerText(), "比赛识别有效");
++  await page.waitForFunction(() => document.querySelector("#positionTxBadge").textContent === "位置下发运行中");
++
++  server.fixtureState.serialOnline = false;
++  server.fixtureState.positionTxHz = 0;
++  server.fixtureState.uartState = "DISCONNECTED";
++  await page.waitForFunction(() => document.querySelector("#positionTxBadge").textContent === "UART故障");
+ });
+ 
+ async function dispatchPointer(page, targetSelector, type, options) {
+@@ -142,7 +157,7 @@ async function dispatchPointer(page, targetSelector, type, options) {
+   }, {targetSelector, type, options});
+ }
+ 
+-test("drawer handle and panel geometry never overlap protected content", {timeout: 30000}, async (context) => {
++test("drawer handle and panel geometry never overlap protected content", {timeout: 30000, skip: !HAS_BROWSER}, async (context) => {
+   const server = createServer();
+   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+   const browser = await launchBrowser();
+@@ -157,7 +172,10 @@ test("drawer handle and panel geometry never overlap protected content", {timeou
+ 
+   for (const viewport of [
+     {width: 800, height: 480},
++    {width: 1024, height: 600},
+     {width: 1280, height: 720},
++    {width: 1280, height: 800},
++    {width: 1920, height: 1080},
+     {width: 720, height: 1280},
+   ]) {
+     await page.setViewportSize(viewport);
+@@ -171,10 +189,12 @@ test("drawer handle and panel geometry never overlap protected content", {timeou
+         handle: rect(document.querySelector("#drawerHandle")),
+         protected: [...document.querySelectorAll(".status-tags > *, .telemetry-lines dt, .telemetry-lines dd, #lastError, #normalDock button")].map(rect),
+         scroll: [document.documentElement.scrollHeight, document.documentElement.clientHeight, document.body.scrollHeight, document.body.clientHeight],
++        actions: [...document.querySelectorAll(".persistent-actions button")].map(rect),
+       };
+     });
+     assert.ok(closed.protected.every((item) => !intersects(closed.handle, item)), `closed overlap at ${viewport.width}x${viewport.height}`);
+     assert.deepEqual(closed.scroll, [viewport.height, viewport.height, viewport.height, viewport.height]);
++    assert.ok(closed.actions.every((item) => item.top >= 0 && item.bottom <= viewport.height));
+ 
+     await page.getByRole("button", {name: "打开摄像头参数"}).click();
+     await page.locator("[data-control=brightness]").waitFor({state: "visible"});
+@@ -197,7 +217,7 @@ test("drawer handle and panel geometry never overlap protected content", {timeou
+   }
+ });
+ 
+-test("touch range distinguishes vertical scrolling from horizontal adjustment", {timeout: 30000}, async (context) => {
++test("touch range distinguishes vertical scrolling from horizontal adjustment", {timeout: 30000, skip: !HAS_BROWSER}, async (context) => {
+   const server = createServer();
+   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+   const browser = await launchBrowser();
+@@ -255,7 +275,7 @@ test("touch range distinguishes vertical scrolling from horizontal adjustment",
+   assert.equal(server.fixtureState.patches.length, patchCountBeforeTap);
+ });
+ 
+-test("successful apply clears pending diagnostic with one render", {timeout: 30000}, async (context) => {
++test("successful apply clears pending diagnostic with one render", {timeout: 30000, skip: !HAS_BROWSER}, async (context) => {
+   const server = createServer({applyDelayMs: 220});
+   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+   const browser = await launchBrowser();
+@@ -294,7 +314,7 @@ test("successful apply clears pending diagnostic with one render", {timeout: 300
+   assert.equal(renderAfter, renderBefore + 1);
+ });
+ 
+-test("failed apply keeps the Chinese failure diagnostic", {timeout: 30000}, async (context) => {
++test("failed apply keeps the Chinese failure diagnostic", {timeout: 30000, skip: !HAS_BROWSER}, async (context) => {
+   const server = createServer({patchFailure: true});
+   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+   const browser = await launchBrowser();
+@@ -317,7 +337,7 @@ test("failed apply keeps the Chinese failure diagnostic", {timeout: 30000}, asyn
+   assert.equal(failed.pending, false);
+ });
+ 
+-test("requested and actual mismatch shows values without applying state", {timeout: 30000}, async (context) => {
++test("requested and actual mismatch shows values without applying state", {timeout: 30000, skip: !HAS_BROWSER}, async (context) => {
+   const server = createServer({
+     controlOverrides: {brightness: {requested: 20, actual: 18, mismatch: true}},
+   });
+@@ -338,7 +358,7 @@ test("requested and actual mismatch shows values without applying state", {timeo
+   assert.doesNotMatch(await page.locator("#cameraControls").innerText(), /正在应用/);
+ });
+ 
+-test("compact controls are Chinese, writable-only and preserve mouse/button behavior", {timeout: 30000}, async (context) => {
++test("compact controls are Chinese, writable-only and preserve mouse/button behavior", {timeout: 30000, skip: !HAS_BROWSER}, async (context) => {
+   const server = createServer();
+   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+   const browser = await launchBrowser();
+diff --git a/tests/test_kiosk_exit.py b/tests/test_kiosk_exit.py
+deleted file mode 100644
+index db8c8ddd5034409ee396a5124a3a302fed457619..0000000000000000000000000000000000000000
+--- a/tests/test_kiosk_exit.py
++++ /dev/null
+@@ -1,113 +0,0 @@
+-"""kiosk退出仅验证和操作固定PID文件中的当前用户浏览器进程。"""
+-
+-from pathlib import Path
+-import signal
+-
+-import pytest
+-
+-from touch_ui.kiosk import KioskExitError, exit_kiosk
+-
+-
+-def _fake_process(tmp_path: Path, command: bytes) -> tuple[Path, Path, int]:
+-    pid = 4321
+-    runtime = tmp_path / "runtime"
+-    runtime.mkdir()
+-    pid_file = runtime / "kiosk.pid"
+-    pid_file.write_text(f"{pid}\n", encoding="ascii")
+-    process = tmp_path / "proc" / str(pid)
+-    process.mkdir(parents=True)
+-    (process / "cmdline").write_bytes(command)
+-    return pid_file, tmp_path / "proc", pid
+-
+-
+-@pytest.mark.parametrize(
+-    "browser_name",
+-    ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome"],
+-)
+-def test_valid_owned_chrome_family_kiosk_receives_sigterm(
+-    tmp_path: Path, browser_name: str
+-) -> None:
+-    profile = tmp_path / "runtime" / "chrome-profile"
+-    pid_file, process_root, pid = _fake_process(
+-        tmp_path,
+-        f"/usr/bin/{browser_name}\0--kiosk\0--user-data-dir={profile}\0".encode(),
+-    )
+-    calls = []
+-    uid = (process_root / str(pid)).stat().st_uid
+-    assert exit_kiosk(
+-        pid_file,
+-        process_root=process_root,
+-        platform_name="Linux",
+-        current_uid=uid,
+-        kill_process=lambda process_id, sig: calls.append((process_id, sig)),
+-    ) == pid
+-    assert calls == [(pid, signal.SIGTERM)]
+-    assert (pid_file.parent / "kiosk.exit_requested").read_text(encoding="ascii") == "exit\n"
+-
+-
+-def test_unrelated_process_is_never_terminated(tmp_path: Path) -> None:
+-    pid_file, process_root, pid = _fake_process(tmp_path, b"/usr/bin/python3\0worker.py\0")
+-    calls = []
+-    uid = (process_root / str(pid)).stat().st_uid
+-    with pytest.raises(KioskExitError, match="不是受支持"):
+-        exit_kiosk(
+-            pid_file,
+-            process_root=process_root,
+-            platform_name="Linux",
+-            current_uid=uid,
+-            kill_process=lambda *args: calls.append(args),
+-        )
+-    assert calls == []
+-    assert (pid_file.parent / "kiosk.exit_requested").exists()
+-
+-
+-def test_firefox_local_kiosk_url_remains_supported(tmp_path: Path) -> None:
+-    pid_file, process_root, pid = _fake_process(
+-        tmp_path, b"/usr/bin/firefox\0--kiosk\0http://localhost:8765\0"
+-    )
+-    calls = []
+-    uid = (process_root / str(pid)).stat().st_uid
+-    exit_kiosk(
+-        pid_file,
+-        process_root=process_root,
+-        platform_name="Linux",
+-        current_uid=uid,
+-        kill_process=lambda process_id, sig: calls.append((process_id, sig)),
+-    )
+-    assert calls == [(pid, signal.SIGTERM)]
+-
+-
+-def test_browser_without_project_profile_or_local_url_is_rejected(tmp_path: Path) -> None:
+-    pid_file, process_root, pid = _fake_process(
+-        tmp_path, b"/usr/bin/google-chrome\0--kiosk\0https://example.com\0"
+-    )
+-    calls = []
+-    uid = (process_root / str(pid)).stat().st_uid
+-    with pytest.raises(KioskExitError, match="专用profile或本地"):
+-        exit_kiosk(
+-            pid_file,
+-            process_root=process_root,
+-            platform_name="Linux",
+-            current_uid=uid,
+-            kill_process=lambda *args: calls.append(args),
+-        )
+-    assert calls == []
+-
+-
+-def test_pid_file_rejects_non_numeric_content(tmp_path: Path) -> None:
+-    pid_file = tmp_path / "kiosk.pid"
+-    pid_file.write_text("1; shutdown -h now\n", encoding="ascii")
+-    with pytest.raises(KioskExitError, match="正整数"):
+-        exit_kiosk(pid_file, platform_name="Linux", current_uid=0)
+-    assert (tmp_path / "kiosk.exit_requested").exists()
+-
+-
+-def test_exit_request_is_created_before_pid_read(tmp_path: Path) -> None:
+-    with pytest.raises(KioskExitError, match="无法读取"):
+-        exit_kiosk(tmp_path / "kiosk.pid", platform_name="Linux", current_uid=0)
+-    assert (tmp_path / "kiosk.exit_requested").read_text(encoding="ascii") == "exit\n"
+-
+-
+-def test_windows_reports_unsupported_without_process_access(tmp_path: Path) -> None:
+-    with pytest.raises(KioskExitError, match="当前平台不支持"):
+-        exit_kiosk(tmp_path / "missing.pid", platform_name="Windows")
+diff --git a/tests/test_kiosk_script_runtime.py b/tests/test_kiosk_script_runtime.py
+deleted file mode 100644
+index dfd7c08a623e529531e72a61696c1ac74eb75306..0000000000000000000000000000000000000000
+--- a/tests/test_kiosk_script_runtime.py
++++ /dev/null
+@@ -1,146 +0,0 @@
+-"""在Linux上用假浏览器验证kiosk脚本的有界重启和信号清理。"""
+-
+-from __future__ import annotations
+-
+-import os
+-from pathlib import Path
+-import platform
+-import shutil
+-import signal
+-import subprocess
+-import time
+-
+-import pytest
+-
+-
+-ROOT = Path(__file__).resolve().parents[1]
+-
+-
+-def _fixture(tmp_path: Path, mode: str, max_restarts: int = 5):
+-    if platform.system() != "Linux" or shutil.which("bash") is None:
+-        pytest.skip("kiosk运行时脚本测试仅在Linux执行")
+-    project = tmp_path / "project"
+-    deploy = project / "deploy"
+-    fake_bin = tmp_path / "bin"
+-    deploy.mkdir(parents=True)
+-    fake_bin.mkdir()
+-    script = deploy / "start_kiosk.sh"
+-    shutil.copy2(ROOT / "deploy/start_kiosk.sh", script)
+-    script.chmod(0o755)
+-    curl = fake_bin / "curl"
+-    curl.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n")
+-    curl.chmod(0o755)
+-    browser = fake_bin / "chromium"
+-    browser.write_text(
+-        """#!/usr/bin/env bash
+-count=0
+-[[ -f "$MOCK_COUNT_FILE" ]] && count="$(cat "$MOCK_COUNT_FILE")"
+-count=$((count + 1))
+-printf '%s\n' "$count" > "$MOCK_COUNT_FILE"
+-printf '%s\n' "$*" >> "$MOCK_ARGS_FILE"
+-case "$MOCK_MODE" in
+-  normal) exit 0 ;;
+-  requested) touch "$MOCK_RUNTIME/kiosk.exit_requested"; exit 143 ;;
+-  abnormal_then_ok) [[ "$count" -eq 1 ]] && exit 2 || exit 0 ;;
+-  always_fail) exit 2 ;;
+-  sleep) exec sleep 30 ;;
+-  *) exit 9 ;;
+-esac
+-""",
+-        encoding="utf-8",
+-        newline="\n",
+-    )
+-    browser.chmod(0o755)
+-    environment = os.environ.copy()
+-    environment.update(
+-        {
+-            "PATH": f"{fake_bin}:{environment['PATH']}",
+-            "MOCK_MODE": mode,
+-            "MOCK_COUNT_FILE": str(tmp_path / "count"),
+-            "MOCK_ARGS_FILE": str(tmp_path / "args"),
+-            "MOCK_RUNTIME": str(project / "runtime"),
+-            "VISION_KIOSK_MAX_RESTARTS": str(max_restarts),
+-            "VISION_KIOSK_RESTART_DELAY": "0",
+-        }
+-    )
+-    return script, environment, tmp_path / "count", tmp_path / "args", project / "runtime"
+-
+-
+-def _run(script: Path, environment: dict[str, str]):
+-    return subprocess.run(
+-        ["bash", str(script)],
+-        cwd=script.parents[1],
+-        env=environment,
+-        check=False,
+-        capture_output=True,
+-        text=True,
+-        encoding="utf-8",
+-        errors="replace",
+-        timeout=10,
+-    )
+-
+-
+-def test_normal_browser_exit_does_not_restart(tmp_path: Path) -> None:
+-    script, environment, count, arguments, runtime = _fixture(tmp_path, "normal")
+-    runtime.mkdir(parents=True)
+-    (runtime / "kiosk.exit_requested").write_text("stale\n", encoding="ascii")
+-    completed = _run(script, environment)
+-    assert completed.returncode == 0
+-    assert count.read_text().strip() == "1"
+-    assert not (runtime / "kiosk.pid").exists()
+-    assert not (runtime / "kiosk.exit_requested").exists()
+-    assert f"--user-data-dir={runtime / 'chrome-profile'}" in arguments.read_text()
+-
+-
+-def test_exit_requested_does_not_restart_and_is_cleaned(tmp_path: Path) -> None:
+-    script, environment, count, _arguments, runtime = _fixture(tmp_path, "requested")
+-    completed = _run(script, environment)
+-    assert completed.returncode == 0 and count.read_text().strip() == "1"
+-    assert not (runtime / "kiosk.pid").exists()
+-    assert not (runtime / "kiosk.exit_requested").exists()
+-
+-
+-def test_abnormal_exit_retries_but_normal_second_exit_stops(tmp_path: Path) -> None:
+-    script, environment, count, _arguments, _runtime = _fixture(
+-        tmp_path, "abnormal_then_ok"
+-    )
+-    completed = _run(script, environment)
+-    assert completed.returncode == 0
+-    assert count.read_text().strip() == "2"
+-    assert "第1次重试" in completed.stderr
+-
+-
+-def test_abnormal_retries_are_limited(tmp_path: Path) -> None:
+-    script, environment, count, _arguments, _runtime = _fixture(
+-        tmp_path, "always_fail", max_restarts=2
+-    )
+-    completed = _run(script, environment)
+-    assert completed.returncode == 2
+-    assert count.read_text().strip() == "3"
+-    assert "达到最大重试次数2" in completed.stderr
+-
+-
+-def test_sigterm_stops_only_child_and_cleans_pid(tmp_path: Path) -> None:
+-    script, environment, _count, _arguments, runtime = _fixture(tmp_path, "sleep")
+-    process = subprocess.Popen(
+-        ["bash", str(script)],
+-        cwd=script.parents[1],
+-        env=environment,
+-        stdout=subprocess.PIPE,
+-        stderr=subprocess.PIPE,
+-        text=True,
+-        encoding="utf-8",
+-        errors="replace",
+-    )
+-    pid_file = runtime / "kiosk.pid"
+-    deadline = time.monotonic() + 3
+-    while not pid_file.exists() and time.monotonic() < deadline:
+-        time.sleep(0.02)
+-    assert pid_file.exists()
+-    child_pid = int(pid_file.read_text().strip())
+-    process.send_signal(signal.SIGTERM)
+-    process.communicate(timeout=5)
+-    assert process.returncode == 0
+-    assert not pid_file.exists()
+-    with pytest.raises(ProcessLookupError):
+-        os.kill(child_pid, 0)
+diff --git a/tests/test_touch_deploy.py b/tests/test_touch_deploy.py
+index 7e56b17d1ef8f123a87b742af8e644706585e7d7..559e094c42844320b509cf1715e0a220c7ec4cac 100644
+--- a/tests/test_touch_deploy.py
++++ b/tests/test_touch_deploy.py
+@@ -1,61 +1,135 @@
+-"""部署文件只做静态检查，不在Windows执行systemd或Chromium。"""
++"""部署文件静态检查；Windows 不执行 systemd、NetworkManager 或 Nginx。"""
+ 
++from __future__ import annotations
++
++import hashlib
+ from pathlib import Path
+ 
+ 
+ ROOT = Path(__file__).resolve().parents[1]
++MAIN_SERVICE = ROOT / "deploy/vision-touch.service.template"
++MAIN_SERVICE_SHA256 = "0f6e077e0dff49f52b6502c4a289d11b5893a383367fc6f94b1dd56fa7ed1557"
+ 
+ 
+-def test_systemd_template_uses_placeholders_and_safe_stop() -> None:
+-    text = (ROOT / "deploy/vision-touch.service.template").read_text(encoding="utf-8")
++def test_visual_main_service_content_and_hash_are_invariant() -> None:
++    data = MAIN_SERVICE.read_bytes()
++    text = data.decode("utf-8")
++    assert hashlib.sha256(data).hexdigest() == MAIN_SERVICE_SHA256
+     assert "User=@USER@" in text
++    assert "SupplementaryGroups=video dialout" in text
+     assert "WorkingDirectory=@PROJECT_DIR@" in text
+-    assert "@PROJECT_DIR@/.venv/bin/python" in text
+-    assert "KillSignal=SIGINT" in text and "RestartSec=" in text
+-    assert "Restart=on-failure" in text and "Restart=always" not in text
+-    assert "--detector digit" not in text
+-    assert "C:\\" not in text and "/home/" not in text
++    assert (
++        "ExecStart=@PROJECT_DIR@/.venv/bin/python app.py --mode track "
++        "--serial-port /dev/ttyAMA0 --baudrate 9600 --serial-rate 50 "
++        "--touch-ui --headless"
++    ) in text
++    assert "Restart=on-failure" in text
++    assert "TimeoutStopSec=15" in text
++
++
++def test_app_startup_entrypoint_is_unchanged_by_hotspot_deployment() -> None:
++    data = (ROOT / "app.py").read_bytes()
++    assert b"hotspot" not in data.lower()
++    assert b"cxb-hotspot" not in data.lower()
++    assert b"192.168.50.1" not in data
+ 
+ 
+-def test_install_script_validates_platform_and_does_not_enable_network_or_ssh() -> None:
++def test_original_visual_installer_keeps_service_generation_but_removes_browser_autostart() -> None:
+     text = (ROOT / "deploy/install_touch_ui.sh").read_text(encoding="utf-8")
+-    assert "uname -s" in text and "systemctl daemon-reload" in text
+-    assert "video,dialout" in text and ".venv/bin/python" in text
+-    assert "ssh" not in text.lower() and "nmcli" not in text.lower()
+-
+-
+-def test_kiosk_is_local_only_and_waits_for_health() -> None:
+-    text = (ROOT / "deploy/start_kiosk.sh").read_text(encoding="utf-8")
+-    assert "http://127.0.0.1:8765" in text
+-    assert 'VISION_TOUCH_URL="${VISION_TOUCH_URL:-' in text
+-    assert "localhost" in text and "::1" in text and "eval" not in text
+-    assert "/healthz" in text and "--kiosk" in text
+-    assert "chromium-browser" in text and "https://" not in text
+-    assert "google-chrome" in text and "google-chrome-stable" in text
+-    assert "firefox" in text
+-    assert "kiosk.pid" in text and "mktemp" in text and "mv -f" in text
+-    assert "kiosk.exit_requested" in text
+-    assert "while true" not in text
+-    assert "MAX_RESTARTS" in text and "browser_status" in text
+-    assert '--user-data-dir="$CHROME_PROFILE"' in text
+-    assert 'CHROME_PROFILE="$RUNTIME_DIR/chrome-profile"' in text
+-    assert "--no-sandbox" not in text
+-
+-
+-def test_installer_passes_validated_touch_url_as_environment_variable() -> None:
+-    install = (ROOT / "deploy/install_touch_ui.sh").read_text(encoding="utf-8")
+-    desktop = (ROOT / "deploy/vision-touch-kiosk.desktop.template").read_text(
+-        encoding="utf-8"
+-    )
+-    assert "load_touch_ui_config" in install
+-    assert "tools.check_digit_templates" not in install
+-    assert "@TOUCH_URL@" in desktop and "VISION_TOUCH_URL=" in desktop
+-    assert "eval" not in install
+-
+-
+-def test_raspberry_pi_dependencies_include_serial_and_are_checked() -> None:
++    assert "vision-touch.service.template" in text
++    assert "systemctl enable vision-touch.service" in text
++    assert "vision-touch-kiosk.desktop" in text
++    assert "rm -f --" in text
++    assert "start_kiosk.sh" not in text
++    assert "chromium" not in text.lower()
++
++
++def test_local_browser_launcher_and_desktop_template_are_removed() -> None:
++    assert not (ROOT / "deploy/start_kiosk.sh").exists()
++    assert not (ROOT / "deploy/vision-touch-kiosk.desktop.template").exists()
++    assert not (ROOT / "touch_ui/kiosk.py").exists()
++
++
++def test_tablet_installer_never_modifies_or_restarts_visual_main_service() -> None:
++    install = (ROOT / "deploy/install_tablet_web.sh").read_text(encoding="utf-8")
++    uninstall = (ROOT / "deploy/uninstall_tablet_web.sh").read_text(encoding="utf-8")
++    assert "main_service_hash_before" in install and "main_service_hash_after" in install
++    # The template name is deliberately read for the before/after hash guard.  The
++    # tablet installer must never install, enable, restart, or remove the unit.
++    assert "/etc/systemd/system/vision-touch.service" not in install
++    assert "systemctl enable vision-touch.service" not in install
++    assert "systemctl restart vision-touch.service" not in install
++    assert "systemctl stop vision-touch.service" not in install
++    assert "vision-touch.service" not in uninstall
++    assert "systemctl restart cxb-hotspot.service" in install
++    assert "systemctl restart camera-debug-web.service" in install
++    assert "systemctl restart nginx.service" in install
++    assert "systemctl enable cxb-hotspot.service" in install
++    assert "systemctl enable camera-debug-web.service" in install
++    assert "systemctl enable nginx.service" in install
++    assert "systemctl is-enabled --quiet" in install
++
++
++def test_new_services_are_independent_and_restart_on_failure() -> None:
++    hotspot = (ROOT / "deploy/systemd/cxb-hotspot.service").read_text(encoding="utf-8")
++    debug = (ROOT / "deploy/systemd/camera-debug-web.service").read_text(encoding="utf-8")
++    assert "After=NetworkManager.service" in hotspot
++    assert "Wants=NetworkManager.service" in hotspot
++    assert "ExecStart=@PROJECT_DIR@/deploy/hotspot/install_hotspot.sh" in hotspot
++    assert "ExecStart=@PROJECT_DIR@/.venv/bin/python -m web_debug.server" in debug
++    assert "--host 127.0.0.1 --port 8081" in debug
++    assert "Restart=on-failure" in debug
++    assert "CameraService" not in debug and "ttyAMA" not in debug
++
++
++def test_nginx_routes_fixed_hotspot_addresses_without_exposing_backend() -> None:
++    nginx = (ROOT / "deploy/nginx/camera-tablet.conf.template").read_text(encoding="utf-8")
++    assert "listen 192.168.50.1:80;" in nginx
++    assert "listen 192.168.50.1:8080;" in nginx
++    assert "proxy_pass http://127.0.0.1:8081;" in nginx
++    assert "proxy_pass http://127.0.0.1:8000;" in nginx
++    assert "location ^~ /recordings/" in nginx
++    assert "proxy_force_ranges on" in nginx
++    assert "127.0.0.1:8765" not in nginx
++    assert "proxy_buffering off" in nginx
++    assert "proxy_cache off" in nginx
++    assert "client_max_body_size 64k" in nginx
++    assert "autoindex off" in nginx
++    assert "listen 0.0.0.0" not in nginx
++
++
++def test_uninstaller_only_removes_new_services_and_legacy_autostart() -> None:
++    text = (ROOT / "deploy/uninstall_tablet_web.sh").read_text(encoding="utf-8")
++    assert "camera-debug-web.service" in text
++    assert "cxb-hotspot.service" in text
++    assert "camera-tablet.conf" in text
++    assert "vision-touch-kiosk.desktop" in text
++    assert "/etc/systemd/system/nginx.service.d/camera-tablet-hotspot.conf" in text
++    for forbidden in ("models", "recordings", "app.py"):
++        assert f"rm -f -- {forbidden}" not in text
++
++
++def test_nginx_systemd_dropin_orders_binding_after_hotspot() -> None:
++    install = (ROOT / "deploy/install_tablet_web.sh").read_text(encoding="utf-8")
++    assert "camera-tablet-hotspot.conf" in install
++    assert "After=cxb-hotspot.service" in install
++    assert "Wants=cxb-hotspot.service" in install
++    assert "systemctl daemon-reload" in install
++
++
++def test_raspberry_pi_dependencies_still_include_serial() -> None:
+     requirements = (ROOT / "requirements-rpi-ncnn.txt").read_text(encoding="utf-8")
+-    install = (ROOT / "deploy/install_touch_ui.sh").read_text(encoding="utf-8")
+     assert any(line.strip() == "pyserial" for line in requirements.splitlines())
+-    for module in ("serial", "cv2", "yaml"):
+-        assert f"import {module}" in install or "import ${module}" in install
++
++
++def test_debug_proxy_does_not_open_hardware_or_load_detector() -> None:
++    source = (ROOT / "web_debug/server.py").read_text(encoding="utf-8")
++    for forbidden in (
++        "cv2.VideoCapture(",
++        "CameraService(",
++        "serial.Serial(",
++        "BallUartClient(",
++        "SteelBallYoloNcnnDetector(",
++        "/dev/ttyAMA0",
++    ):
++        assert forbidden not in source
+diff --git a/tests/test_touch_frontend.py b/tests/test_touch_frontend.py
+index 32d4d5e891528b2a0b88e8180c65304fc1c5d680..45a2a01e5fc869a778960f4077a837ddd8d7b1ed 100644
+--- a/tests/test_touch_frontend.py
++++ b/tests/test_touch_frontend.py
+@@ -7,18 +7,19 @@ ROOT = Path(__file__).resolve().parents[1]
+ 
+ 
+ def test_web_is_steel_ball_only_and_never_uses_browser_serial() -> None:
+-    html = (ROOT / "touch_ui_web/index.html").read_text(encoding="utf-8")
+-    javascript = (ROOT / "touch_ui_web/app.js").read_text(encoding="utf-8")
++    html = (ROOT / "web_debug/static/index.html").read_text(encoding="utf-8")
++    javascript = (ROOT / "web_debug/static/app.js").read_text(encoding="utf-8")
+     server = (ROOT / "touch_ui/server.py").read_text(encoding="utf-8")
+     combined = html + javascript
+     assert "steelBallStatus" in html
+     assert "ballPixelPosition" in html
+-    assert "mcuStatus" in html and "lastSentPosition" in html
++    assert "mcuFields" in html and "lastSentPosition" in html
++    assert 'id="mcuStatus"' not in html
+     assert "navigator.serial" not in combined
+     assert "/api/detector" not in server
+-HTML = (ROOT / "touch_ui_web/index.html").read_text(encoding="utf-8")
+-CSS = (ROOT / "touch_ui_web/style.css").read_text(encoding="utf-8")
+-JS = (ROOT / "touch_ui_web/app.js").read_text(encoding="utf-8")
++HTML = (ROOT / "web_debug/static/index.html").read_text(encoding="utf-8")
++CSS = (ROOT / "web_debug/static/style.css").read_text(encoding="utf-8")
++JS = (ROOT / "web_debug/static/app.js").read_text(encoding="utf-8")
+ 
+ 
+ def test_page_is_fixed_viewport_with_non_overlapping_side_dock() -> None:
+@@ -117,7 +118,8 @@ def test_maintenance_requires_long_press_and_danger_confirmation() -> None:
+     assert 'maintenanceButton").addEventListener("pointerdown"' in JS
+     assert "confirmDanger(" in JS
+     assert 'request("/api/runtime/stop"' in JS
+-    assert 'request("/api/kiosk/exit"' in JS
++    assert 'id="exitKiosk"' not in HTML
++    assert "/api/kiosk/exit" not in JS
+ 
+ 
+ def test_portrait_layout_keeps_preview_above_dock() -> None:
+@@ -138,6 +140,9 @@ def test_frontend_displays_calibration_error_and_real_uart_rates() -> None:
+     assert "ball_position_calibration_error" in JS
+     assert "position_tx_hz" in JS
+     assert "invalid_tx_hz" in JS
++    assert '["S", "F", "EN", "X", "V", "E", "RQ", "AP", "PW", "AGE", "ST", "AC", "RJ"]' in JS
++    assert 'request("/debug/events")' in JS
++    assert 'id="eventLog"' in HTML
+ 
+ 
+ def test_performance_panel_keeps_ncnn_and_end_to_end_latency_distinct() -> None:
+diff --git a/tests/test_vision_runtime.py b/tests/test_vision_runtime.py
+index 5bc7d5e977276972083130548ba73ebe9664335e..3657e839b276b3510febad2e7aa8216ab152099f 100644
+--- a/tests/test_vision_runtime.py
++++ b/tests/test_vision_runtime.py
+@@ -5,6 +5,7 @@ import threading
+ import time
+ 
+ import numpy as np
++import pytest
+ 
+ from core.models import FramePacket, TargetState, VisionResult
+ from core.vision_runtime import VisionRuntime
+@@ -168,6 +169,16 @@ def test_valid_calibration_allows_position() -> None:
+     assert runtime.ball_uart.positions == [0]
+ 
+ 
++def test_enter_competition_is_rejected_when_position_is_uncalibrated() -> None:
++    runtime = make_runtime(False, calibrated=False)
++    with pytest.raises(RuntimeError, match="未标定"):
++        runtime._set_competition(True)
++    status = runtime.get_status_snapshot()
++    assert status["competition_mode"] is False
++    assert status["vision_output_enabled"] is False
++    assert runtime.ball_uart.starts == 0
++
++
+ def test_equal_calibration_endpoints_are_reported_without_crashing() -> None:
+     runtime = make_runtime(calibrated=True, left=72, right=72)
+     status = runtime.get_status_snapshot()
+diff --git a/tests/touch_ui_fixture_server.py b/tests/touch_ui_fixture_server.py
+index 61f423b7a8708ae72f8ffc8cb074eeb681d7d5e7..4d0dc6bfd6006ce3083ec7b8cecbf633bae88873 100644
+--- a/tests/touch_ui_fixture_server.py
++++ b/tests/touch_ui_fixture_server.py
+@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
+ 
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+-WEB_ROOT = ROOT / "touch_ui_web"
++WEB_ROOT = ROOT / "web_debug" / "static"
+ CONTROLS = {
+     "brightness": {
+         "supported": True,
+diff --git a/touch_ui/kiosk.py b/touch_ui/kiosk.py
+deleted file mode 100644
+index c32355574cbdf2e241f2cd7458f9d58d7ddb004b..0000000000000000000000000000000000000000
+--- a/touch_ui/kiosk.py
++++ /dev/null
+@@ -1,110 +0,0 @@
+-"""安全退出本机kiosk浏览器；模块导入时不探测进程或平台硬件。"""
+-
+-from __future__ import annotations
+-
+-import logging
+-import os
+-from pathlib import Path
+-import platform
+-import re
+-import signal
+-import tempfile
+-from typing import Callable
+-
+-
+-LOG = logging.getLogger(__name__)
+-_BROWSER_NAMES = {
+-    "chromium",
+-    "chromium-browser",
+-    "google-chrome",
+-    "google-chrome-stable",
+-    "chrome",
+-    "firefox",
+-}
+-
+-
+-class KioskExitError(RuntimeError):
+-    """PID文件或目标进程未通过安全验证。"""
+-
+-
+-def _read_pid(pid_file: Path) -> int:
+-    try:
+-        value = pid_file.read_text(encoding="ascii").strip()
+-    except OSError as exc:
+-        raise KioskExitError(f"无法读取kiosk PID文件: {exc}") from exc
+-    if re.fullmatch(r"[1-9][0-9]*", value) is None:
+-        raise KioskExitError("kiosk PID文件必须只包含正整数")
+-    return int(value)
+-
+-
+-def _write_exit_marker(marker: Path) -> None:
+-    marker.parent.mkdir(parents=True, exist_ok=True)
+-    descriptor, temporary_name = tempfile.mkstemp(
+-        prefix=f".{marker.name}.", suffix=".tmp", dir=marker.parent
+-    )
+-    temporary = Path(temporary_name)
+-    try:
+-        with os.fdopen(descriptor, "w", encoding="ascii", newline="\n") as handle:
+-            handle.write("exit\n")
+-            handle.flush()
+-            os.fsync(handle.fileno())
+-        os.replace(temporary, marker)
+-    except Exception:
+-        temporary.unlink(missing_ok=True)
+-        raise
+-
+-
+-def exit_kiosk(
+-    pid_file: str | Path,
+-    *,
+-    process_root: str | Path = "/proc",
+-    platform_name: str | None = None,
+-    current_uid: int | None = None,
+-    kill_process: Callable[[int, int], None] = os.kill,
+-) -> int:
+-    """验证PID归属和浏览器命令后，只向该kiosk进程发送SIGTERM。"""
+-
+-    system = platform_name or platform.system()
+-    if system != "Linux":
+-        raise KioskExitError(f"当前平台不支持退出kiosk: {system}")
+-    path = Path(pid_file)
+-    marker = path.with_name("kiosk.exit_requested")
+-    try:
+-        _write_exit_marker(marker)
+-    except OSError as exc:
+-        raise KioskExitError(f"无法创建kiosk退出请求: {exc}") from exc
+-    pid = _read_pid(path)
+-    process_dir = Path(process_root) / str(pid)
+-    try:
+-        owner_uid = process_dir.stat().st_uid
+-        command_line = (process_dir / "cmdline").read_bytes().split(b"\0")
+-    except OSError as exc:
+-        raise KioskExitError(f"kiosk PID {pid}对应进程不存在或不可读: {exc}") from exc
+-    expected_uid = os.getuid() if current_uid is None else current_uid
+-    if owner_uid != expected_uid:
+-        raise KioskExitError(f"拒绝结束非当前用户拥有的进程 PID={pid}")
+-    arguments = [item.decode("utf-8", errors="replace") for item in command_line if item]
+-    executable = Path(arguments[0]).name.lower() if arguments else ""
+-    if executable not in _BROWSER_NAMES or "--kiosk" not in arguments:
+-        raise KioskExitError(f"PID={pid}不是受支持的Chrome/Chromium/Firefox kiosk进程")
+-    expected_profile = (path.parent / "chrome-profile").resolve()
+-    has_project_profile = any(
+-        argument.startswith("--user-data-dir=")
+-        and Path(argument.split("=", 1)[1]).resolve() == expected_profile
+-        for argument in arguments
+-    )
+-    has_local_url = any(
+-        value.startswith("http://127.0.0.1:")
+-        or value.startswith("http://localhost:")
+-        for argument in arguments
+-        for value in (argument.removeprefix("--app="),)
+-    )
+-    if not has_project_profile and not has_local_url:
+-        raise KioskExitError(f"PID={pid}不属于本项目专用profile或本地kiosk URL")
+-    try:
+-        kill_process(pid, signal.SIGTERM)
+-    except OSError as exc:
+-        LOG.warning("kiosk退出失败 PID=%s: %s", pid, exc)
+-        raise KioskExitError(f"发送SIGTERM失败 PID={pid}: {exc}") from exc
+-    LOG.warning("已确认并请求退出kiosk PID=%s", pid)
+-    return pid
+diff --git a/touch_ui/server.py b/touch_ui/server.py
+index e94d2b1758ca666da8f0390464bc857e4c7306e3..cb5ae371f0e24e7afd16d8d8daf49f6ff7d99a31 100644
+--- a/touch_ui/server.py
++++ b/touch_ui/server.py
+@@ -14,7 +14,6 @@ from typing import Any
+ from urllib.parse import urlsplit
+ 
+ from touch_ui.api import TouchAPI, api_error
+-from touch_ui.kiosk import KioskExitError, exit_kiosk
+ from touch_ui.models import CommandType, TouchUIConfig, validate_loopback_host
+ 
+ 
+@@ -40,7 +39,9 @@ class TouchUIServer:
+         self.runtime = runtime
+         self.config = config
+         self.api = TouchAPI(runtime)
+-        self.web_root = (web_root or Path(__file__).resolve().parents[1] / "touch_ui_web").resolve()
++        self.web_root = (
++            web_root or Path(__file__).resolve().parents[1] / "web_debug" / "static"
++        ).resolve()
+         self._server: ThreadingHTTPServer | None = None
+         self._thread: threading.Thread | None = None
+         self._stop_request_lock = threading.Lock()
+@@ -224,19 +225,7 @@ class TouchUIServer:
+                     "/api/competition/exit": CommandType.EXIT_COMPETITION,
+                 }
+                 try:
+-                    if path == "/api/kiosk/exit":
+-                        body = self._body()
+-                        if body:
+-                            self._json(*api_error(400, "INVALID_BODY", "退出kiosk不接受PID或命令参数"))
+-                            return
+-                        try:
+-                            pid = exit_kiosk(owner.config.runtime_directory / "kiosk.pid")
+-                        except KioskExitError as exc:
+-                            LOG.warning("浏览器PID验证失败: %s", exc)
+-                            self._json(*api_error(409, "KIOSK_EXIT_REJECTED", str(exc)))
+-                        else:
+-                            self._json(200, {"ok": True, "status": "EXITING", "pid": pid})
+-                    elif path == "/api/runtime/stop":
++                    if path == "/api/runtime/stop":
+                         body = self._body()
+                         if body:
+                             self._json(*api_error(400, "INVALID_BODY", "停止视觉程序不接受命令参数"))
+diff --git a/touch_ui_web/app.js b/touch_ui_web/app.js
+deleted file mode 100644
+index 6f3cb2db584d3ef473b6ce6e161842756a103773..0000000000000000000000000000000000000000
+--- a/touch_ui_web/app.js
++++ /dev/null
+@@ -1,750 +0,0 @@
+-"use strict";
+-
+-const $ = (id) => document.getElementById(id);
+-const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+-let cameraControlsLoaded = false;
+-let cameraControlsState = Object.create(null);
+-let cameraProfileState = {modified: false, override_file_active: false};
+-let pollInterval = 250;
+-let parameterDebounce = 150;
+-let statusPolling = true;
+-let drawerOpen = false;
+-let drawerDrag = null;
+-let maintenanceTimer = null;
+-let maintenanceStarted = 0;
+-let maintenanceOpenedByHold = false;
+-let confirmResolver = null;
+-let cameraControlsRenderCount = 0;
+-let competitionModeEnabled = false;
+-const controlFailures = new Map();
+-const controlScheduler = new ControlUpdateScheduler({
+-  debounceMs: parameterDebounce,
+-  apply: applySingleControl,
+-  onApplied: async (name, _value, camera) => {
+-    if (!camera.controls?.[name]) throw new Error(`服务器同步结果缺少控制项 ${name}`);
+-    if (["white_balance_automatic", "exposure_auto", "focus_auto"].includes(name)) {
+-      Object.entries(camera.controls).forEach(([controlName, info]) => {
+-        cameraControlsState[controlName] = {...info};
+-      });
+-    } else {
+-      cameraControlsState[name] = {...camera.controls[name]};
+-    }
+-    controlFailures.delete(name);
+-    cameraProfileState = {
+-      modified: !!camera.modified,
+-      override_file_active: !!camera.override_file_active,
+-    };
+-    renderCameraControls();
+-    renderCurrentProfile();
+-  },
+-  onError: (name, error) => {
+-    controlFailures.set(name, error.message || String(error));
+-    renderCameraControls();
+-    toast(error.message);
+-  },
+-});
+-const CONTROL_GROUPS = [
+-  ["图像", ["brightness", "contrast", "saturation", "sharpness", "hue", "gamma"]],
+-  ["曝光", ["exposure_auto", "exposure_absolute", "gain", "backlight_compensation", "power_line_frequency"]],
+-  ["白平衡", ["white_balance_automatic", "white_balance_temperature"]],
+-];
+-async function request(path, options = {}) {
+-  const response = await fetch(path, {
+-    headers: {"Content-Type": "application/json"},
+-    cache: "no-store",
+-    ...options,
+-  });
+-  const data = await response.json();
+-  if (!response.ok || !data.ok) throw new Error(data.message || `HTTP ${response.status}`);
+-  return data;
+-}
+-
+-function toast(message) {
+-  $("toast").textContent = message;
+-  $("toast").classList.add("show");
+-  setTimeout(() => $("toast").classList.remove("show"), 2600);
+-}
+-
+-function text(id, value) {
+-  const element = $(id);
+-  if (element) element.textContent = value;
+-}
+-
+-function setTag(id, label, active, warning = false) {
+-  const element = $(id);
+-  text(id, label);
+-  element.classList.toggle("offline", !active);
+-  element.classList.toggle("warning", warning);
+-}
+-
+-function renderStatus(status) {
+-  competitionModeEnabled = !!status.competition_mode;
+-  pollInterval = status.ui?.status_poll_interval_ms || pollInterval;
+-  parameterDebounce = status.ui?.parameter_debounce_ms ?? parameterDebounce;
+-  controlScheduler.setDebounceMs(parameterDebounce);
+-  const visionFps = Number(status.vision_fps ?? status.fps ?? 0);
+-  const cameraFps = Number(status.camera_fps ?? 0);
+-  const previewFps = Number(status.preview_fps ?? 0);
+-  const captureToResult = Number(status.capture_to_result_ms ?? 0);
+-  const captureToResultP95 = Number(status.capture_to_result_p95_ms ?? 0);
+-  text("fps", visionFps.toFixed(1));
+-  text("cameraFps", cameraFps.toFixed(1));
+-  text("previewFps", previewFps.toFixed(1));
+-  text("pipelineFps", `${cameraFps.toFixed(1)} / ${visionFps.toFixed(1)} / ${previewFps.toFixed(1)} FPS`);
+-  text("pipelineLatency", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
+-  text(
+-    "pipelineDrops",
+-    `${Number(status.vision_skipped_camera_frames || 0)} / ${Number(status.preview_overwritten_count || 0)}`,
+-  );
+-  const positionTxCount = Number(status.position_tx_count ?? 0);
+-  const positionTxHz = Number(status.position_tx_hz ?? 0);
+-  const invalidTxHz = Number(status.invalid_tx_hz ?? 0);
+-  text("txCount", `${positionTxCount} · POS ${positionTxHz.toFixed(1)} Hz · INVALID ${invalidTxHz.toFixed(1)} Hz`);
+-  const calibrated = !!status.ball_position_calibrated;
+-  const calibrationError = status.ball_position_calibration_error || "";
+-  const xMillimetres = status.ball_x_mm;
+-  const xPixels = status.ball_x_px;
+-  text(
+-    "ballPosition",
+-    !calibrated
+-      ? "-- mm"
+-      : (xMillimetres === null || xMillimetres === undefined
+-        ? "-- mm"
+-        : `${Number(xMillimetres) > 0 ? "+" : ""}${Number(xMillimetres)} mm`),
+-  );
+-  text("ballPixelPosition", `像素 X：${xPixels === null || xPixels === undefined ? "—" : xPixels}`);
+-  text("mappingState", calibrated ? "已标定" : (calibrationError || "未标定"));
+-  text("uartState", status.uart_state || "串口未打开");
+-  text("uartPortState", status.uart_port_open ? "已打开" : "未打开");
+-  text("mcuStatus", JSON.stringify(status.mcu_status || {}));
+-  text("lastSentPosition", status.last_sent_position_mm === null || status.last_sent_position_mm === undefined ? "--" : `${status.last_sent_position_mm} mm`);
+-  text("lastError", status.last_uart_error || status.detector_error || status.last_error || "无错误");
+-  const steelBallPanel = $("steelBallStatus");
+-  if (steelBallPanel) {
+-    steelBallPanel.hidden = false;
+-    text("steelBallBackend", "YOLO-NCNN");
+-    text("steelBallModel", status.model_loaded ? "已加载" : "未加载");
+-    text(
+-      "steelBallTiming",
+-      `${Number(status.inference_ms || 0).toFixed(1)} / ${Number(status.inference_median_ms || 0).toFixed(1)} / ${Number(status.inference_p95_ms || 0).toFixed(1)} ms`,
+-    );
+-    text("steelBallE2E", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
+-  }
+-  setTag("runningBadge", status.runtime_running ? "RUNNING" : "STOPPED", !!status.runtime_running);
+-  setTag("cameraBadge", status.camera_online ? "CAM ONLINE" : "CAM OFFLINE", !!status.camera_online);
+-  setTag("serialBadge", status.serial_online ? "UART ONLINE" : "UART OFFLINE", !!status.serial_online);
+-  setTag("mcuBadge", status.mcu_ready ? "MCU READY" : "MCU WAIT", !!status.mcu_ready, !status.mcu_ready);
+-  const txState = !status.serial_online ? "OFFLINE" : (!status.mcu_ready ? "WAIT READY" : (status.vision_output_enabled ? "ACTIVE" : "PAUSED"));
+-  setTag(
+-    "positionTxBadge",
+-    `位置 TX ${txState}`,
+-    txState === "ACTIVE",
+-    txState !== "ACTIVE" && txState !== "PAUSED",
+-  );
+-  const dirty = !!status.runtime_modified || controlScheduler.hasPending();
+-  setTag("dirtyBadge", dirty ? "DIRTY" : "CLEAN", !dirty, dirty);
+-  const visionOutputEnabled = !!status.vision_output_enabled;
+-  setTag(
+-    "competitionBadge",
+-    visionOutputEnabled ? "比赛识别有效 · 正在向小车发送" : "调试识别 · 不下发控制",
+-    true,
+-    visionOutputEnabled,
+-  );
+-  text("enterCompetition", competitionModeEnabled ? "停止位置下发" : "启用位置下发");
+-}
+-
+-async function pollStatus() {
+-  if (!statusPolling) return;
+-  try {
+-    const data = await request("/api/status");
+-    renderStatus(data.status);
+-  } catch (error) {
+-    text("lastError", error.message);
+-  } finally {
+-    if (statusPolling) setTimeout(pollStatus, pollInterval);
+-  }
+-}
+-
+-function effectiveControlValue(name, info) {
+-  const desired = controlScheduler.desiredValue(name);
+-  if (desired !== undefined) return desired;
+-  return info.requested ?? info.actual ?? info.minimum;
+-}
+-
+-function controlDependencyHidden(name, controls) {
+-  const dependency = {
+-    white_balance_temperature: "white_balance_automatic",
+-    exposure_absolute: "exposure_auto",
+-    focus_absolute: "focus_auto",
+-  }[name];
+-  if (!dependency || !controls[dependency]) return false;
+-  const autoInfo = controls[dependency];
+-  return automaticModeEnabled(dependency, effectiveControlValue(dependency, autoInfo), autoInfo);
+-}
+-
+-function makeSliderModel(info) {
+-  const choices = normalizedChoices(info);
+-  if (choices.length) {
+-    const values = choices.map((choice) => choice.value);
+-    return {
+-      minimum: 0,
+-      maximum: values.length - 1,
+-      step: 1,
+-      toPosition(value) {
+-        const exact = values.indexOf(Number(value));
+-        if (exact >= 0) return exact;
+-        return values.reduce(
+-          (best, candidate, index) => Math.abs(candidate - Number(value)) < best.distance
+-            ? {index, distance: Math.abs(candidate - Number(value))}
+-            : best,
+-          {index: 0, distance: Infinity},
+-        ).index;
+-      },
+-      fromPosition(position) {
+-        const index = quantizeControlValue(position, 0, values.length - 1, 1);
+-        return values[index];
+-      },
+-    };
+-  }
+-  return {
+-    minimum: Number(info.minimum),
+-    maximum: Number(info.maximum),
+-    step: Number(info.step),
+-    toPosition(value) {
+-      return quantizeControlValue(value, this.minimum, this.maximum, this.step);
+-    },
+-    fromPosition(position) {
+-      return quantizeControlValue(position, this.minimum, this.maximum, this.step);
+-    },
+-  };
+-}
+-
+-function installRepeatingButton(button, previewByOneStep, commitPreview) {
+-  let holdTimer = null;
+-  let repeatTimer = null;
+-  let repeated = false;
+-
+-  const stopTimers = () => {
+-    clearTimeout(holdTimer);
+-    clearInterval(repeatTimer);
+-    holdTimer = null;
+-    repeatTimer = null;
+-  };
+-  button.addEventListener("pointerdown", (event) => {
+-    if (event.button !== 0) return;
+-    stopTimers();
+-    repeated = false;
+-    holdTimer = setTimeout(() => {
+-      repeated = true;
+-      if (!previewByOneStep()) return;
+-      repeatTimer = setInterval(() => {
+-        if (!previewByOneStep()) stopTimers();
+-      }, 150);
+-    }, 400);
+-  });
+-  ["pointerup", "pointercancel", "pointerleave"].forEach((eventName) => {
+-    button.addEventListener(eventName, () => {
+-      stopTimers();
+-      if (repeated) commitPreview();
+-    });
+-  });
+-  button.addEventListener("click", (event) => {
+-    if (repeated) {
+-      event.preventDefault();
+-      repeated = false;
+-      return;
+-    }
+-    if (previewByOneStep()) commitPreview();
+-  });
+-}
+-
+-function installTouchRange(input, row, model, initialRawValue, setVisualValue, commitValue) {
+-  let gesture = null;
+-  let suppressTouchClickUntil = 0;
+-
+-  const releaseCapture = (pointerId) => {
+-    try {
+-      if (input.hasPointerCapture(pointerId)) input.releasePointerCapture(pointerId);
+-    } catch (_error) {
+-      // pointercancel后浏览器可能已自动释放。
+-    }
+-  };
+-  const cleanup = (pointerId) => {
+-    releaseCapture(pointerId);
+-    row.classList.remove("adjusting");
+-    window.removeEventListener("pointermove", onPointerMove);
+-    window.removeEventListener("pointerup", onPointerUp);
+-    window.removeEventListener("pointercancel", onPointerCancel);
+-    gesture = null;
+-  };
+-  const valueAt = (clientX) => {
+-    const rect = input.getBoundingClientRect();
+-    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(1, rect.width)));
+-    return model.fromPosition(model.minimum + ratio * (model.maximum - model.minimum));
+-  };
+-  const onPointerMove = (event) => {
+-    if (!gesture || event.pointerId !== gesture.pointerId) return;
+-    if (gesture.mode === "pending") {
+-      gesture.mode = classifyPointerGesture(
+-        event.clientX - gesture.startX,
+-        event.clientY - gesture.startY,
+-      );
+-      if (gesture.mode === "horizontal") {
+-        row.classList.add("adjusting");
+-        try { input.setPointerCapture(event.pointerId); } catch (_error) { /* best effort */ }
+-      }
+-    }
+-    if (gesture.mode === "horizontal") {
+-      event.preventDefault();
+-      gesture.previewRaw = valueAt(event.clientX);
+-      setVisualValue(gesture.previewRaw);
+-    } else {
+-      setVisualValue(gesture.startRaw);
+-    }
+-  };
+-  const onPointerUp = (event) => {
+-    if (!gesture || event.pointerId !== gesture.pointerId) return;
+-    const completed = gesture;
+-    suppressTouchClickUntil = performance.now() + 500;
+-    if (completed.mode === "horizontal") {
+-      event.preventDefault();
+-      completed.previewRaw = valueAt(event.clientX);
+-      setVisualValue(completed.previewRaw);
+-      commitValue(completed.previewRaw);
+-    } else {
+-      setVisualValue(completed.startRaw);
+-    }
+-    cleanup(event.pointerId);
+-  };
+-  const onPointerCancel = (event) => {
+-    if (!gesture || event.pointerId !== gesture.pointerId) return;
+-    setVisualValue(gesture.startRaw);
+-    suppressTouchClickUntil = performance.now() + 500;
+-    cleanup(event.pointerId);
+-  };
+-
+-  input.addEventListener("pointerdown", (event) => {
+-    if (!event.isPrimary || !["touch", "pen"].includes(event.pointerType)) return;
+-    gesture = {
+-      pointerId: event.pointerId,
+-      startX: event.clientX,
+-      startY: event.clientY,
+-      startRaw: initialRawValue(),
+-      previewRaw: initialRawValue(),
+-      mode: "pending",
+-    };
+-    window.addEventListener("pointermove", onPointerMove, {passive: false});
+-    window.addEventListener("pointerup", onPointerUp, {passive: false});
+-    window.addEventListener("pointercancel", onPointerCancel);
+-  });
+-  input.addEventListener("input", (event) => {
+-    if (!gesture) return;
+-    event.preventDefault();
+-    event.stopImmediatePropagation();
+-    setVisualValue(gesture.mode === "horizontal" ? gesture.previewRaw : gesture.startRaw);
+-  });
+-  input.addEventListener("click", (event) => {
+-    if (performance.now() >= suppressTouchClickUntil) return;
+-    event.preventDefault();
+-    setVisualValue(initialRawValue());
+-  }, true);
+-  return () => gesture;
+-}
+-
+-async function applySingleControl(name, value) {
+-  const queued = await request("/api/config/camera", {
+-    method: "PATCH",
+-    body: JSON.stringify({controls: {[name]: value}}),
+-  });
+-  await waitForCommand(queued.command_id, `设置${controlDisplayName(name)}`);
+-  const synchronized = await request("/api/config/camera");
+-  return synchronized.camera;
+-}
+-
+-function buildControl(name, info, controls) {
+-  const row = document.createElement("article");
+-  row.className = "control-row";
+-  row.dataset.control = name;
+-
+-  const head = document.createElement("div");
+-  head.className = "control-head";
+-  const title = document.createElement("strong");
+-  const displayName = controlDisplayName(name);
+-  title.textContent = displayName;
+-  const valueLabel = document.createElement("span");
+-  valueLabel.className = "control-value";
+-  valueLabel.dataset.role = "value";
+-  let confirmedRawValue = effectiveControlValue(name, info);
+-  let displayedRawValue = confirmedRawValue;
+-  valueLabel.textContent = formatControlValue(name, confirmedRawValue, info);
+-  head.append(title, valueLabel);
+-
+-  const inputs = document.createElement("div");
+-  inputs.className = "control-inputs";
+-  const minus = document.createElement("button");
+-  minus.type = "button";
+-  minus.textContent = "−";
+-  minus.setAttribute("aria-label", `${displayName}减少`);
+-  const input = document.createElement("input");
+-  input.type = "range";
+-  input.dataset.controlInput = name;
+-  input.setAttribute("aria-label", `${displayName}滑动调整`);
+-  const slider = makeSliderModel(info);
+-  input.min = slider.minimum;
+-  input.max = slider.maximum;
+-  input.step = slider.step;
+-  input.value = slider.toPosition(confirmedRawValue);
+-  const plus = document.createElement("button");
+-  plus.type = "button";
+-  plus.textContent = "+";
+-  plus.setAttribute("aria-label", `${displayName}增加`);
+-
+-  const diagnostic = document.createElement("div");
+-  diagnostic.className = "control-diagnostic";
+-  diagnostic.dataset.role = "diagnostic";
+-  const setDiagnostic = (message, failed = false) => {
+-    diagnostic.textContent = message;
+-    diagnostic.hidden = !message;
+-    diagnostic.classList.toggle("failed", failed);
+-  };
+-  const setVisualValue = (rawValue) => {
+-    displayedRawValue = rawValue;
+-    input.value = slider.toPosition(rawValue);
+-    valueLabel.textContent = formatControlValue(name, rawValue, info);
+-  };
+-  const commitValue = (rawValue) => {
+-    const normalized = slider.fromPosition(slider.toPosition(rawValue));
+-    if (normalized === confirmedRawValue && controlScheduler.desiredValue(name) === undefined) {
+-      setVisualValue(normalized);
+-      return false;
+-    }
+-    confirmedRawValue = normalized;
+-    displayedRawValue = normalized;
+-    controlFailures.delete(name);
+-    setVisualValue(normalized);
+-    setDiagnostic("正在应用");
+-    row.classList.add("pending");
+-    controlScheduler.schedule(name, normalized);
+-    setTag("dirtyBadge", "DIRTY", false, true);
+-    return true;
+-  };
+-  const changeBy = (direction) => {
+-    const currentPosition = slider.toPosition(displayedRawValue);
+-    const nextPosition = quantizeControlValue(
+-      currentPosition + direction * slider.step,
+-      slider.minimum,
+-      slider.maximum,
+-      slider.step,
+-    );
+-    if (nextPosition === currentPosition) return false;
+-    setVisualValue(slider.fromPosition(nextPosition));
+-    return true;
+-  };
+-  installRepeatingButton(minus, () => changeBy(-1), () => commitValue(displayedRawValue));
+-  installRepeatingButton(plus, () => changeBy(1), () => commitValue(displayedRawValue));
+-  const activeTouchGesture = installTouchRange(
+-    input,
+-    row,
+-    slider,
+-    () => confirmedRawValue,
+-    setVisualValue,
+-    commitValue,
+-  );
+-  input.addEventListener("input", () => {
+-    if (!activeTouchGesture()) commitValue(slider.fromPosition(Number(input.value)));
+-  });
+-  inputs.append(minus, input, plus);
+-  const failure = controlFailures.get(name);
+-  const desired = controlScheduler.desiredValue(name) ?? info.requested;
+-  const phase = controlScheduler.phase(name);
+-  if (failure || info.last_success === false) {
+-    setDiagnostic("应用失败", true);
+-  } else if (["DEBOUNCE", "SENT"].includes(phase)) {
+-    setDiagnostic("正在应用");
+-    row.classList.add("pending");
+-  } else if (info.mismatch || (
+-    desired !== null && desired !== undefined && info.actual !== null && info.actual !== undefined
+-    && Number(desired) !== Number(info.actual)
+-  )) {
+-    setDiagnostic(
+-      `设置值：${formatControlValue(name, desired, info)}　实际值：${formatControlValue(name, info.actual, info)}`,
+-    );
+-  } else {
+-    setDiagnostic("");
+-    row.classList.remove("pending");
+-  }
+-  row.append(head, inputs, diagnostic);
+-  return row;
+-}
+-
+-function renderCurrentProfile() {
+-  const profile = cameraProfileState.modified
+-    ? "现场参数（未保存）"
+-    : (cameraProfileState.override_file_active ? "上次有效参数" : "启动基准");
+-  text("currentProfile", profile);
+-}
+-
+-function renderCameraControls() {
+-  const container = $("cameraControls");
+-  const previousScrollTop = container.scrollTop;
+-  cameraControlsRenderCount += 1;
+-  container.replaceChildren();
+-  const visible = Object.entries(cameraControlsState).filter(([name, info]) => (
+-    controlIsWritable(name, info) && !controlDependencyHidden(name, cameraControlsState)
+-  ));
+-  const visibleNames = new Set(visible.map(([name]) => name));
+-  const rendered = new Set();
+-  CONTROL_GROUPS.forEach(([label, names]) => {
+-    const available = names.filter((name) => visibleNames.has(name));
+-    if (!available.length) return;
+-    const group = document.createElement("section");
+-    group.className = "control-group";
+-    const heading = document.createElement("h3");
+-    heading.textContent = label;
+-    group.append(heading);
+-    available.forEach((name) => {
+-      rendered.add(name);
+-      group.append(buildControl(name, cameraControlsState[name], cameraControlsState));
+-    });
+-    container.append(group);
+-  });
+-  const other = visible.filter(([name]) => !rendered.has(name));
+-  if (other.length) {
+-    const group = document.createElement("section");
+-    group.className = "control-group other-controls";
+-    const heading = document.createElement("h3");
+-    heading.textContent = "其他参数";
+-    group.append(heading);
+-    other.forEach(([name, info]) => group.append(buildControl(name, info, cameraControlsState)));
+-    container.append(group);
+-  }
+-  if (!visible.length) {
+-    const empty = document.createElement("p");
+-    empty.className = "controls-empty";
+-    empty.textContent = "当前摄像头没有可调参数";
+-    container.append(empty);
+-  }
+-  container.scrollTop = Math.min(
+-    previousScrollTop,
+-    Math.max(0, container.scrollHeight - container.clientHeight),
+-  );
+-}
+-
+-function replaceCameraControlState(camera, {resetScheduler = false} = {}) {
+-  if (resetScheduler) {
+-    controlScheduler.reset();
+-    controlFailures.clear();
+-  }
+-  const source = camera.controls || {};
+-  cameraControlsState = Object.fromEntries(
+-    Object.entries(source).map(([name, info]) => [name, {...info}]),
+-  );
+-  cameraProfileState = {
+-    modified: !!camera.modified,
+-    override_file_active: !!camera.override_file_active,
+-  };
+-  renderCameraControls();
+-  renderCurrentProfile();
+-  cameraControlsLoaded = true;
+-}
+-
+-async function loadCameraControls(options = {}) {
+-  try {
+-    const data = await request("/api/config/camera");
+-    replaceCameraControlState(data.camera, options);
+-    return data.camera;
+-  } catch (error) {
+-    console.error("前后端摄像头参数状态同步失败", error);
+-    throw error;
+-  }
+-}
+-
+-async function waitForCommand(commandId, label, timeoutMilliseconds = 12000) {
+-  const deadline = performance.now() + timeoutMilliseconds;
+-  while (performance.now() < deadline) {
+-    const data = await request("/api/status");
+-    renderStatus(data.status);
+-    const command = data.status.commands?.[commandId];
+-    if (command?.status === "APPLIED") return command;
+-    if (command?.status === "FAILED") throw new Error(command.message || `${label}失败`);
+-    await sleep(100);
+-  }
+-  throw new Error(`${label}等待超时`);
+-}
+-
+-async function runCommand(path, label, {refreshCamera = false, body = {}} = {}) {
+-  text("operationResult", `${label}中…`);
+-  toast(`${label}中…`);
+-  try {
+-    const data = await request(path, {method: "POST", body: JSON.stringify(body)});
+-    await waitForCommand(data.command_id, label);
+-    if (refreshCamera) await loadCameraControls({resetScheduler: true});
+-    text("operationResult", `${label}成功`);
+-    toast(`${label}成功`);
+-    return true;
+-  } catch (error) {
+-    text("operationResult", `${label}失败：${error.message}`);
+-    toast(`${label}失败：${error.message}`);
+-    return false;
+-  }
+-}
+-
+-function setDrawerOpen(open) {
+-  drawerOpen = !!open;
+-  $("sideDock").classList.toggle("drawer-open", drawerOpen);
+-  $("cameraPanel").setAttribute("aria-hidden", String(!drawerOpen));
+-  $("drawerHandle").setAttribute("aria-expanded", String(drawerOpen));
+-  $("drawerHandle").setAttribute("aria-label", drawerOpen ? "关闭摄像头参数" : "打开摄像头参数");
+-  $("cameraPanel").style.transform = "";
+-  if (drawerOpen && !cameraControlsLoaded) loadCameraControls().catch((error) => toast(error.message));
+-}
+-
+-function beginDrawerDrag(event) {
+-  event.preventDefault();
+-  const width = $("sideDock").getBoundingClientRect().width;
+-  drawerDrag = {pointerId: event.pointerId, startX: event.clientX, width, wasOpen: drawerOpen, moved: false};
+-  $("drawerHandle").setPointerCapture(event.pointerId);
+-  $("sideDock").classList.add("dragging");
+-}
+-
+-function moveDrawer(event) {
+-  if (!drawerDrag || event.pointerId !== drawerDrag.pointerId) return;
+-  event.preventDefault();
+-  const delta = event.clientX - drawerDrag.startX;
+-  if (Math.abs(delta) > 4) drawerDrag.moved = true;
+-  const starting = drawerDrag.wasOpen ? 0 : drawerDrag.width;
+-  const translate = Math.max(0, Math.min(drawerDrag.width, starting + delta));
+-  $("cameraPanel").style.transform = `translateX(${translate}px)`;
+-}
+-
+-function finishDrawerDrag(event, cancelled = false) {
+-  if (!drawerDrag || event.pointerId !== drawerDrag.pointerId) return;
+-  const drag = drawerDrag;
+-  drawerDrag = null;
+-  $("sideDock").classList.remove("dragging");
+-  if ($("drawerHandle").hasPointerCapture(event.pointerId)) $("drawerHandle").releasePointerCapture(event.pointerId);
+-  if (cancelled) {
+-    setDrawerOpen(drag.wasOpen);
+-    return;
+-  }
+-  const delta = event.clientX - drag.startX;
+-  if (!drag.moved) {
+-    setDrawerOpen(!drag.wasOpen);
+-  } else if (drag.wasOpen) {
+-    setDrawerOpen(!(delta >= drag.width * 0.4));
+-  } else {
+-    setDrawerOpen(-delta >= drag.width * 0.4);
+-  }
+-}
+-
+-function openMaintenance() {
+-  maintenanceOpenedByHold = true;
+-  $("maintenanceMenu").hidden = false;
+-}
+-
+-function cancelMaintenanceHold() {
+-  clearInterval(maintenanceTimer);
+-  maintenanceTimer = null;
+-  $("maintenanceButton").style.setProperty("--hold-progress", "0%");
+-}
+-
+-function beginMaintenanceHold(event) {
+-  event.preventDefault();
+-  maintenanceOpenedByHold = false;
+-  maintenanceStarted = performance.now();
+-  $("maintenanceButton").setPointerCapture(event.pointerId);
+-  maintenanceTimer = setInterval(() => {
+-    const ratio = Math.min(1, (performance.now() - maintenanceStarted) / 2000);
+-    $("maintenanceButton").style.setProperty("--hold-progress", `${ratio * 100}%`);
+-    if (ratio >= 1) {
+-      cancelMaintenanceHold();
+-      openMaintenance();
+-    }
+-  }, 40);
+-}
+-
+-function endMaintenanceHold(event) {
+-  if (maintenanceTimer) {
+-    cancelMaintenanceHold();
+-    toast("请长按维护按钮2秒");
+-  }
+-  if ($("maintenanceButton").hasPointerCapture(event.pointerId)) $("maintenanceButton").releasePointerCapture(event.pointerId);
+-}
+-
+-function confirmDanger(title, message) {
+-  text("confirmTitle", title);
+-  text("confirmMessage", message);
+-  $("confirmDialog").hidden = false;
+-  return new Promise((resolve) => { confirmResolver = resolve; });
+-}
+-
+-function finishConfirmation(accepted) {
+-  $("confirmDialog").hidden = true;
+-  if (confirmResolver) confirmResolver(accepted);
+-  confirmResolver = null;
+-}
+-
+-$("showCamera").addEventListener("click", () => setDrawerOpen(true));
+-$("closeCamera").addEventListener("click", () => setDrawerOpen(false));
+-$("drawerHandle").addEventListener("pointerdown", beginDrawerDrag);
+-$("drawerHandle").addEventListener("pointermove", moveDrawer);
+-$("drawerHandle").addEventListener("pointerup", (event) => finishDrawerDrag(event, false));
+-$("drawerHandle").addEventListener("pointercancel", (event) => finishDrawerDrag(event, true));
+-$("saveRuntime").addEventListener("click", async () => {
+-  await controlScheduler.flushDebounced();
+-  await runCommand("/api/runtime/save", "保存现场参数", {refreshCamera: true});
+-});
+-$("restoreLast").addEventListener("click", async () => {
+-  controlScheduler.cancelDebounced();
+-  await controlScheduler.waitForIdle();
+-  await runCommand("/api/runtime/restore-last-good", "恢复上次有效参数", {refreshCamera: true});
+-});
+-$("restoreBaseline").addEventListener("click", async () => {
+-  controlScheduler.cancelDebounced();
+-  await controlScheduler.waitForIdle();
+-  await runCommand("/api/runtime/restore-baseline", "恢复基准参数", {refreshCamera: true});
+-});
+-$("enterCompetition").addEventListener("click", () => runCommand(
+-  competitionModeEnabled ? "/api/competition/exit" : "/api/competition/enter",
+-  competitionModeEnabled ? "停止位置下发" : "启用位置下发",
+-));
+-
+-$("maintenanceButton").addEventListener("pointerdown", beginMaintenanceHold);
+-$("maintenanceButton").addEventListener("pointerup", endMaintenanceHold);
+-$("maintenanceButton").addEventListener("pointercancel", endMaintenanceHold);
+-$("closeMaintenance").addEventListener("click", () => { $("maintenanceMenu").hidden = true; });
+-$("reloadPage").addEventListener("click", () => window.location.reload());
+-$("maintenanceExitCompetition").addEventListener("click", async () => {
+-  if (!await confirmDanger("退出比赛模式", "确认恢复现场调试功能？")) return;
+-  $("maintenanceMenu").hidden = true;
+-  await runCommand("/api/competition/exit", "退出比赛模式");
+-});
+-$("exitKiosk").addEventListener("click", async () => {
+-  if (!await confirmDanger("退出全屏界面", "确认关闭当前kiosk浏览器？视觉程序将继续运行。")) return;
+-  try {
+-    await request("/api/kiosk/exit", {method: "POST", body: "{}"});
+-    toast("正在退出全屏界面");
+-  } catch (error) { toast(`退出失败：${error.message}`); }
+-});
+-$("stopRuntime").addEventListener("click", async () => {
+-  if (!await confirmDanger("停止视觉程序", "将安全停止摄像头、串口和Web服务，确认继续？")) return;
+-  try {
+-    await request("/api/runtime/stop", {method: "POST", body: "{}"});
+-    statusPolling = false;
+-    $("maintenanceMenu").hidden = true;
+-    $("stoppedOverlay").hidden = false;
+-  } catch (error) { toast(`停止失败：${error.message}`); }
+-});
+-$("confirmCancel").addEventListener("click", () => finishConfirmation(false));
+-$("confirmAccept").addEventListener("click", () => finishConfirmation(true));
+-
+-window.__visionTouchTest = {
+-  setDrawerOpen,
+-  finishDrawerDrag,
+-  replaceCameraControlState,
+-  controlScheduler,
+-  waitForCommand,
+-  getCameraControlsRenderCount: () => cameraControlsRenderCount,
+-};
+-
+-pollStatus();
+diff --git a/touch_ui_web/assets/.gitkeep b/touch_ui_web/assets/.gitkeep
+deleted file mode 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..0000000000000000000000000000000000000000
+diff --git a/touch_ui_web/control_scheduler.js b/touch_ui_web/control_scheduler.js
+deleted file mode 100644
+index a48553005ada2813874845cf7fa0aef9b89b3fac..0000000000000000000000000000000000000000
+--- a/touch_ui_web/control_scheduler.js
++++ /dev/null
+@@ -1,293 +0,0 @@
+-(function (root, factory) {
+-  "use strict";
+-  const exported = factory();
+-  if (typeof module === "object" && module.exports) module.exports = exported;
+-  Object.assign(root, exported);
+-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+-  "use strict";
+-
+-  const CONTROL_LABELS = Object.freeze({
+-    brightness: "亮度",
+-    contrast: "对比度",
+-    saturation: "饱和度",
+-    hue: "色调",
+-    sharpness: "锐度",
+-    gamma: "伽马",
+-    gain: "增益",
+-    backlight_compensation: "逆光补偿",
+-    white_balance_automatic: "自动白平衡",
+-    white_balance_temperature: "白平衡色温",
+-    exposure_auto: "自动曝光",
+-    exposure_absolute: "曝光时间",
+-    power_line_frequency: "抗频闪频率",
+-    focus_auto: "自动对焦",
+-    focus_absolute: "对焦位置",
+-  });
+-  const WRITABLE_CONTROL_KEYS = new Set(Object.keys(CONTROL_LABELS));
+-  const VALID_CONTROL_TYPES = new Set(["int", "integer", "integer64", "bool", "boolean", "menu"]);
+-  const TOKEN_LABELS = Object.freeze({
+-    auto: "自动", automatic: "自动", balance: "平衡", compensation: "补偿",
+-    temperature: "色温", absolute: "数值", frequency: "频率", focus: "对焦",
+-    exposure: "曝光", white: "白", backlight: "逆光", power: "电源", line: "线路",
+-  });
+-
+-  function normalizedChoices(info = {}) {
+-    const source = info.choices;
+-    const choices = [];
+-    if (Array.isArray(source)) {
+-      source.forEach((item) => {
+-        if (item && typeof item === "object" && Number.isFinite(Number(item.value))) {
+-          choices.push({value: Number(item.value), label: String(item.label ?? item.name ?? item.value)});
+-        }
+-      });
+-    } else if (source && typeof source === "object") {
+-      Object.entries(source).forEach(([value, label]) => {
+-        if (Number.isFinite(Number(value))) choices.push({value: Number(value), label: String(label)});
+-      });
+-    }
+-    if (!choices.length && ["bool", "boolean"].includes(String(info.type || "").toLowerCase())) {
+-      choices.push({value: 0, label: "Off"}, {value: 1, label: "On"});
+-    }
+-    const unique = new Map();
+-    choices.forEach((choice) => unique.set(choice.value, choice));
+-    return [...unique.values()].sort((first, second) => first.value - second.value);
+-  }
+-
+-  function controlDisplayName(name) {
+-    if (CONTROL_LABELS[name]) return CONTROL_LABELS[name];
+-    const tokens = String(name).split("_");
+-    if (tokens.length && tokens.every((token) => TOKEN_LABELS[token])) {
+-      return tokens.map((token) => TOKEN_LABELS[token]).join("");
+-    }
+-    return "其他参数";
+-  }
+-
+-  function translateChoiceLabel(label, value) {
+-    const original = String(label ?? "").trim();
+-    const normalized = original.toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+-    const exact = {
+-      true: "开", false: "关", on: "开", off: "关", enabled: "开", disabled: "关闭",
+-      auto: "自动", automatic: "自动", manual: "手动", "50hz": "50赫兹", "50 hz": "50赫兹",
+-      "60hz": "60赫兹", "60 hz": "60赫兹", "manual mode": "手动",
+-      "auto mode": "自动", "automatic mode": "自动", "aperture priority mode": "光圈优先",
+-      "shutter priority mode": "快门优先",
+-    };
+-    if (exact[normalized]) return exact[normalized];
+-    if (/^50\s*hz\b/.test(normalized)) return "50赫兹";
+-    if (/^60\s*hz\b/.test(normalized)) return "60赫兹";
+-    if (/manual/.test(normalized)) return "手动";
+-    if (/aperture/.test(normalized)) return "光圈优先";
+-    if (/shutter/.test(normalized)) return "快门优先";
+-    if (/auto/.test(normalized)) return "自动";
+-    if (/^[\u3400-\u9fff]/.test(original)) return original;
+-    return `选项${value}`;
+-  }
+-
+-  function formatControlValue(name, value, info = {}) {
+-    if (value === null || value === undefined || value === "") return "—";
+-    const choices = normalizedChoices(info);
+-    const choice = choices.find((item) => item.value === Number(value));
+-    if (choice) return translateChoiceLabel(choice.label, choice.value);
+-    if (["white_balance_automatic", "focus_auto"].includes(name)) {
+-      return Number(value) === 0 ? "关" : "开";
+-    }
+-    return String(value);
+-  }
+-
+-  function controlIsWritable(name, info = {}) {
+-    if (info.supported !== true || info.read_only === true || info.writable === false) return false;
+-    if (!WRITABLE_CONTROL_KEYS.has(name) && info.setter_supported !== true) return false;
+-    const type = String(info.type || "int").toLowerCase();
+-    if (!VALID_CONTROL_TYPES.has(type)) return false;
+-    const minimum = Number(info.minimum);
+-    const maximum = Number(info.maximum);
+-    const step = Number(info.step);
+-    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum >= maximum) return false;
+-    if (!Number.isFinite(step) || step <= 0) return false;
+-    if (type === "menu" && normalizedChoices(info).length < 2) return false;
+-    return true;
+-  }
+-
+-  function automaticModeEnabled(name, value, info = {}) {
+-    const choice = normalizedChoices(info).find((item) => item.value === Number(value));
+-    const semantics = String(choice?.label ?? "").toLowerCase();
+-    if (/manual|disabled|\boff\b|false/.test(semantics)) return false;
+-    if (/auto|automatic|aperture|shutter|continuous|\bon\b|true/.test(semantics)) return true;
+-    if (name === "exposure_auto") return Number(value) !== 1;
+-    return Number(value) !== 0;
+-  }
+-
+-  function classifyPointerGesture(deltaX, deltaY) {
+-    const horizontal = Math.abs(Number(deltaX) || 0);
+-    const vertical = Math.abs(Number(deltaY) || 0);
+-    if (vertical >= 10 && vertical > horizontal * 1.25) return "vertical";
+-    if (horizontal >= 12 && horizontal > vertical * 1.25) return "horizontal";
+-    return "pending";
+-  }
+-
+-  function decimalPlaces(value) {
+-    const text = String(value);
+-    if (/e-/i.test(text)) return Number(text.split(/e-/i)[1]) || 0;
+-    return (text.split(".")[1] || "").length;
+-  }
+-
+-  function quantizeControlValue(value, minimum, maximum, step) {
+-    const low = Number(minimum);
+-    const high = Number(maximum);
+-    const increment = Number(step);
+-    if (![value, low, high, increment].every((item) => Number.isFinite(Number(item))) || increment <= 0) {
+-      throw new TypeError("控制范围和step必须是有效数字");
+-    }
+-    const digits = Math.min(8, Math.max(decimalPlaces(low), decimalPlaces(high), decimalPlaces(increment)));
+-    const scale = 10 ** digits;
+-    const lowUnits = Math.round(low * scale);
+-    const highUnits = Math.round(high * scale);
+-    const stepUnits = Math.max(1, Math.round(increment * scale));
+-    const valueUnits = Math.round(Number(value) * scale);
+-    const snapped = lowUnits + Math.round((valueUnits - lowUnits) / stepUnits) * stepUnits;
+-    const clamped = Math.min(highUnits, Math.max(lowUnits, snapped));
+-    return Number((clamped / scale).toFixed(digits));
+-  }
+-
+-  class ControlUpdateScheduler {
+-    constructor({debounceMs = 150, apply, onApplied = async () => {}, onError = () => {}}) {
+-      if (typeof apply !== "function") throw new TypeError("apply必须为函数");
+-      this.debounceMs = debounceMs;
+-      this.apply = apply;
+-      this.onApplied = onApplied;
+-      this.onError = onError;
+-      this.desired = new Map();
+-      this.timers = new Map();
+-      this.active = new Map();
+-      this.phases = new Map();
+-    }
+-
+-    setDebounceMs(milliseconds) {
+-      this.debounceMs = Math.max(0, Number(milliseconds) || 0);
+-    }
+-
+-    schedule(name, value) {
+-      const previous = this.desired.get(name);
+-      const version = (previous?.version || 0) + 1;
+-      this.desired.set(name, {value, version});
+-      this.phases.set(name, "DEBOUNCE");
+-      clearTimeout(this.timers.get(name));
+-      this.timers.set(name, setTimeout(() => {
+-        this.timers.delete(name);
+-        this._dispatch(name, version);
+-      }, this.debounceMs));
+-      return version;
+-    }
+-
+-    desiredValue(name) {
+-      return this.desired.get(name)?.value;
+-    }
+-
+-    desiredEntries() {
+-      return [...this.desired.entries()].map(([name, item]) => [name, item.value]);
+-    }
+-
+-    phase(name) {
+-      return this.phases.get(name) || "IDLE";
+-    }
+-
+-    hasPending() {
+-      return this.timers.size > 0 || this.active.size > 0 || this.desired.size > 0;
+-    }
+-
+-    async _dispatch(name, version) {
+-      clearTimeout(this.timers.get(name));
+-      this.timers.delete(name);
+-      const desired = this.desired.get(name);
+-      if (!desired || desired.version !== version) return;
+-      if (this.active.has(name)) return;
+-
+-      const activeRecord = {value: desired.value, version};
+-      this.phases.set(name, "SENT");
+-      const promise = Promise.resolve().then(async () => {
+-        try {
+-          const result = await this.apply(name, activeRecord.value, version);
+-          const latest = this.desired.get(name);
+-          if (latest?.version === version) {
+-            this.phases.set(name, "COMPLETED");
+-            await this.onApplied(name, activeRecord.value, result, version);
+-            if (this.desired.get(name)?.version === version) {
+-              this.desired.delete(name);
+-              this.phases.delete(name);
+-            }
+-          }
+-        } catch (error) {
+-          if (this.desired.get(name)?.version === version) {
+-            this.desired.delete(name);
+-            this.phases.delete(name);
+-          }
+-          this.onError(name, error, version);
+-        } finally {
+-          this.active.delete(name);
+-          const latest = this.desired.get(name);
+-          if (latest && latest.version !== version) {
+-            this._dispatch(name, latest.version);
+-          }
+-        }
+-      });
+-      this.active.set(name, {...activeRecord, promise});
+-      await promise;
+-    }
+-
+-    async flushDebounced() {
+-      const waiting = [...this.timers.keys()];
+-      for (const name of waiting) {
+-        clearTimeout(this.timers.get(name));
+-        this.timers.delete(name);
+-        const desired = this.desired.get(name);
+-        if (desired) this._dispatch(name, desired.version);
+-      }
+-      await this.waitForIdle();
+-    }
+-
+-    cancelDebounced() {
+-      for (const name of [...this.timers.keys()]) {
+-        clearTimeout(this.timers.get(name));
+-        this.timers.delete(name);
+-      }
+-      for (const [name, desired] of [...this.desired.entries()]) {
+-        const active = this.active.get(name);
+-        if (active) {
+-          if (desired.version !== active.version) {
+-            this.desired.set(name, {value: active.value, version: active.version});
+-          }
+-          this.phases.set(name, "SENT");
+-        } else if (this.phases.get(name) === "DEBOUNCE") {
+-          this.desired.delete(name);
+-          this.phases.delete(name);
+-        }
+-      }
+-    }
+-
+-    async waitForIdle() {
+-      while (this.active.size > 0) {
+-        await Promise.allSettled([...this.active.values()].map((item) => item.promise));
+-      }
+-    }
+-
+-    reset() {
+-      this.cancelDebounced();
+-      if (this.active.size > 0) throw new Error("仍有已发送的参数请求，不能重置调度器");
+-      this.desired.clear();
+-      this.phases.clear();
+-    }
+-  }
+-
+-  return {
+-    CONTROL_LABELS,
+-    ControlUpdateScheduler,
+-    automaticModeEnabled,
+-    classifyPointerGesture,
+-    controlDisplayName,
+-    controlIsWritable,
+-    formatControlValue,
+-    normalizedChoices,
+-    quantizeControlValue,
+-    translateChoiceLabel,
+-  };
+-});
+diff --git a/touch_ui_web/index.html b/touch_ui_web/index.html
+deleted file mode 100644
+index f0612c8dc7fa7e1b63bd4d7c718ed456e442ecc9..0000000000000000000000000000000000000000
+--- a/touch_ui_web/index.html
++++ /dev/null
+@@ -1,120 +0,0 @@
+-<!doctype html>
+-<html lang="zh-CN">
+-<head>
+-  <meta charset="utf-8">
+-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+-  <title>钢球位置控制台</title>
+-  <link rel="stylesheet" href="/style.css?v=5">
+-</head>
+-<body>
+-  <div id="appShell">
+-    <section id="previewPane" class="preview-pane" aria-label="实时摄像头预览">
+-      <img id="preview" src="/api/preview.mjpg" alt="实时标注画面">
+-      <div class="preview-overlay">
+-        <span>摄像头 <b id="cameraFps">0.0</b> / 识别 <b id="fps">0.0</b> / 预览 <b id="previewFps">0.0</b></span>
+-      </div>
+-    </section>
+-
+-    <aside id="sideDock" class="side-dock">
+-      <header class="dock-header">
+-        <div class="dock-title"><span class="eyebrow">STEEL BALL</span><h1>钢球位置</h1></div>
+-        <button id="drawerHandle" class="icon-button drawer-handle" aria-label="打开摄像头参数" aria-expanded="false">
+-          <span>‹</span>
+-        </button>
+-        <button id="maintenanceButton" class="icon-button maintenance-button" aria-label="长按打开维护菜单">
+-          <span>⋮</span><i id="maintenanceProgress"></i>
+-        </button>
+-      </header>
+-
+-      <div id="normalDock" class="dock-content">
+-        <div class="status-tags">
+-          <span id="runningBadge" class="status-tag offline">STOPPED</span>
+-          <span id="cameraBadge" class="status-tag offline">CAM OFFLINE</span>
+-          <span id="serialBadge" class="status-tag offline">UART OFFLINE</span>
+-          <span id="mcuBadge" class="status-tag warning">MCU WAIT</span>
+-          <span id="positionTxBadge" class="status-tag warning">位置 TX OFFLINE</span>
+-          <span id="dirtyBadge" class="status-tag">CLEAN</span>
+-          <span id="competitionBadge" class="status-tag">DEBUG</span>
+-        </div>
+-
+-        <section class="ball-position-card" aria-label="钢球横向位置">
+-          <span>横向位置</span>
+-          <strong id="ballPosition">-- mm</strong>
+-          <small id="ballPixelPosition">像素 X：—</small>
+-        </section>
+-
+-        <dl class="telemetry-lines">
+-          <div><dt>位置包发送</dt><dd id="txCount">0</dd></div>
+-          <div><dt>位置标定</dt><dd id="mappingState">未标定</dd></div>
+-          <div><dt>UART状态</dt><dd id="uartState">串口未打开</dd></div>
+-          <div><dt>UART 端口</dt><dd id="uartPortState">未打开</dd></div>
+-          <div><dt>MCU 状态</dt><dd id="mcuStatus">{}</dd></div>
+-          <div><dt>最近发送位置</dt><dd id="lastSentPosition">--</dd></div>
+-          <div><dt>摄像头 / 识别 / 预览</dt><dd id="pipelineFps">0 / 0 / 0 FPS</dd></div>
+-          <div><dt>端到端 当前 / P95</dt><dd id="pipelineLatency">0 / 0 ms</dd></div>
+-          <div><dt>跳帧 / 预览覆盖</dt><dd id="pipelineDrops">0 / 0</dd></div>
+-        </dl>
+-
+-        <dl id="steelBallStatus" class="telemetry-lines">
+-          <div><dt>钢球识别</dt><dd id="steelBallBackend">—</dd></div>
+-          <div><dt>模型</dt><dd id="steelBallModel">—</dd></div>
+-          <div><dt>推理 当前 / 中位 / P95</dt><dd id="steelBallTiming">0 / 0 / 0 ms</dd></div>
+-          <div><dt>端到端 当前 / P95</dt><dd id="steelBallE2E">0 / 0 ms</dd></div>
+-        </dl>
+-
+-        <div id="lastError" class="error-line">无错误</div>
+-
+-        <section class="dock-section compact-actions">
+-          <button id="showCamera" class="primary">摄像头参数</button>
+-          <button id="enterCompetition" class="danger">启用位置下发</button>
+-        </section>
+-      </div>
+-
+-      <section id="cameraPanel" class="camera-drawer" aria-hidden="true">
+-        <header class="drawer-header">
+-          <div><span class="eyebrow">CAMERA PROFILE</span><h2>摄像头参数</h2></div>
+-          <div class="drawer-meta">
+-            <div class="profile-line">当前配置：<strong id="currentProfile">读取中</strong></div>
+-            <div id="operationResult" class="operation-result" aria-live="polite"></div>
+-          </div>
+-          <button id="closeCamera" class="icon-button" aria-label="关闭参数面板">×</button>
+-        </header>
+-        <div id="cameraControls" class="camera-controls-scroll"></div>
+-        <footer class="drawer-footer">
+-          <button id="saveRuntime" class="primary" aria-label="保存现场参数" title="保存现场参数">保存</button>
+-          <button id="restoreLast" aria-label="恢复上次有效参数" title="恢复上次有效参数">上次</button>
+-          <button id="restoreBaseline" class="danger" aria-label="恢复启动基准参数" title="恢复启动基准参数">基准</button>
+-        </footer>
+-      </section>
+-    </aside>
+-  </div>
+-
+-  <div id="maintenanceMenu" class="modal-backdrop" hidden>
+-    <section class="maintenance-menu" role="dialog" aria-modal="true" aria-labelledby="maintenanceTitle">
+-      <h2 id="maintenanceTitle">维护菜单</h2>
+-      <p>危险操作需要再次确认。</p>
+-      <button id="reloadPage">重新加载页面</button>
+-      <button id="maintenanceExitCompetition">退出比赛模式</button>
+-      <button id="exitKiosk" class="danger">退出全屏界面</button>
+-      <button id="stopRuntime" class="danger solid">停止视觉程序</button>
+-      <button id="closeMaintenance">取消</button>
+-    </section>
+-  </div>
+-
+-  <div id="confirmDialog" class="modal-backdrop" hidden>
+-    <section class="confirm-dialog" role="alertdialog" aria-modal="true">
+-      <h2 id="confirmTitle">确认操作</h2>
+-      <p id="confirmMessage"></p>
+-      <div class="confirm-actions">
+-        <button id="confirmCancel">取消</button>
+-        <button id="confirmAccept" class="danger solid">确认</button>
+-      </div>
+-    </section>
+-  </div>
+-
+-  <div id="stoppedOverlay" class="stopped-overlay" hidden>视觉服务已停止</div>
+-  <div id="toast" role="status" aria-live="polite"></div>
+-  <script src="/control_scheduler.js?v=5"></script>
+-  <script src="/app.js?v=5"></script>
+-</body>
+-</html>
+diff --git a/touch_ui_web/style.css b/touch_ui_web/style.css
+deleted file mode 100644
+index 64dc752e2f6423f996708b9d2406dc763a9420c5..0000000000000000000000000000000000000000
+--- a/touch_ui_web/style.css
++++ /dev/null
+@@ -1,255 +0,0 @@
+-:root {
+-  color-scheme: dark;
+-  --bg: #05090c;
+-  --panel: #101b22;
+-  --panel-2: #172730;
+-  --line: #29414d;
+-  --text: #f2f7f8;
+-  --muted: #96abb5;
+-  --accent: #36d4a7;
+-  --blue: #65aaff;
+-  --danger: #ff6e61;
+-  --dock-width: clamp(280px, 35vw, 420px);
+-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+-}
+-
+-* { box-sizing: border-box; }
+-html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+-body { background: var(--bg); color: var(--text); overscroll-behavior: none; }
+-button, input { font: inherit; }
+-button {
+-  min-height: 48px;
+-  border: 1px solid #3b5968;
+-  border-radius: 10px;
+-  padding: 8px 11px;
+-  background: var(--panel-2);
+-  color: var(--text);
+-  font-weight: 750;
+-  touch-action: manipulation;
+-}
+-button:active, button.active { border-color: var(--accent); background: #1c443b; }
+-button:disabled { opacity: .38; }
+-button.primary { border-color: #247e68; background: #174338; }
+-button.danger { border-color: #74423d; color: #ffb6ae; }
+-button.danger.solid { background: #6a2924; color: white; }
+-
+-#appShell {
+-  width: 100%;
+-  height: 100dvh;
+-  overflow: hidden;
+-  display: grid;
+-  grid-template-columns: minmax(0, 1fr) var(--dock-width);
+-  background: #020507;
+-}
+-
+-.preview-pane {
+-  min-width: 0;
+-  min-height: 0;
+-  position: relative;
+-  display: grid;
+-  place-items: center;
+-  overflow: hidden;
+-  background: #000;
+-}
+-#preview { width: 100%; height: 100%; display: block; object-fit: contain; background: #000; }
+-.preview-overlay {
+-  position: absolute;
+-  left: 10px;
+-  bottom: 10px;
+-  display: flex;
+-  align-items: center;
+-  gap: 8px;
+-  max-width: calc(100% - 20px);
+-  padding: 6px 10px;
+-  border: 1px solid #ffffff28;
+-  border-radius: 9px;
+-  background: #020608cf;
+-  font-size: clamp(11px, 1.5vw, 14px);
+-  white-space: nowrap;
+-}
+-.preview-overlay strong { color: var(--accent); font-size: 1.3em; }
+-
+-.side-dock {
+-  min-width: 0;
+-  min-height: 0;
+-  position: relative;
+-  overflow: hidden;
+-  display: grid;
+-  grid-template-rows: 64px minmax(0, 1fr);
+-  border-left: 1px solid var(--line);
+-  background: linear-gradient(150deg, #14232b, #0d171d 62%);
+-}
+-.dock-header {
+-  position: relative;
+-  z-index: 9;
+-  height: 64px;
+-  min-height: 64px;
+-  padding: 8px 8px 8px 12px;
+-  display: grid;
+-  grid-template-columns: minmax(0, 1fr) 48px 48px;
+-  gap: 5px;
+-  align-items: center;
+-  border-bottom: 1px solid var(--line);
+-  background: #13222a;
+-}
+-.dock-title { min-width: 0; }
+-.dock-title h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+-.eyebrow { display: block; color: var(--accent); font-size: 9px; letter-spacing: .2em; }
+-h1, h2 { margin: 0; }
+-h1 { font-size: clamp(18px, 2.3vw, 26px); }
+-h2 { font-size: 17px; }
+-.icon-button { min-width: 48px; width: 48px; min-height: 48px; padding: 0; font-size: 26px; }
+-.maintenance-button { position: relative; overflow: hidden; }
+-.maintenance-button i {
+-  position: absolute;
+-  left: 0;
+-  bottom: 0;
+-  width: var(--hold-progress, 0%);
+-  height: 4px;
+-  background: var(--danger);
+-}
+-
+-.dock-content {
+-  min-height: 0;
+-  overflow: hidden;
+-  padding: 10px 12px 12px 18px;
+-}
+-.status-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+-.status-tag {
+-  min-height: 24px;
+-  padding: 4px 7px;
+-  border: 1px solid #2c6958;
+-  border-radius: 999px;
+-  background: #15382f;
+-  color: #7cf1ce;
+-  font-size: 10px;
+-  font-weight: 850;
+-}
+-.status-tag.offline { border-color: #67403c; background: #3c2422; color: #ffaaa2; }
+-.status-tag.warning { border-color: #79642f; background: #3c331d; color: #f4d77b; }
+-.telemetry-lines { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin: 0; background: var(--line); }
+-.telemetry-lines div { min-width: 0; padding: 7px 9px; background: var(--panel); }
+-.telemetry-lines dt { color: var(--muted); font-size: 10px; }
+-.telemetry-lines dd { margin: 2px 0 0; overflow: hidden; color: var(--text); font-size: 15px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+-.error-line { margin-top: 7px; min-height: 30px; max-height: 48px; overflow: hidden; padding: 6px 8px; border-radius: 7px; background: #2d1e1d; color: #ffaaa2; font-size: 11px; }
+-.dock-section { margin-top: 9px; }
+-.dock-section h2 { margin-bottom: 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+-.button-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+-.compact-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+-.ball-position-card {
+-  margin-bottom: 8px;
+-  padding: 10px 12px;
+-  display: grid;
+-  grid-template-columns: minmax(0, 1fr) auto;
+-  align-items: baseline;
+-  gap: 2px 10px;
+-  border: 1px solid #2c6958;
+-  border-radius: 12px;
+-  background: #102e28;
+-}
+-.ball-position-card span { color: var(--muted); font-size: 12px; }
+-.ball-position-card strong { color: var(--accent); font-size: clamp(28px, 5vw, 48px); white-space: nowrap; }
+-.ball-position-card small { grid-column: 1 / -1; color: var(--blue); }
+-
+-.drawer-handle {
+-  width: 48px;
+-  min-width: 48px;
+-  height: 48px;
+-  padding: 0;
+-  border-radius: 10px;
+-  background: #225b50;
+-  font-size: 28px;
+-  touch-action: none;
+-  user-select: none;
+-}
+-.side-dock.drawer-open .drawer-handle span { display: inline-block; transform: rotate(180deg); }
+-.camera-drawer {
+-  position: absolute;
+-  z-index: 7;
+-  inset: 64px 0 0;
+-  min-width: 0;
+-  min-height: 0;
+-  display: grid;
+-  grid-template-rows: auto minmax(0, 1fr) auto;
+-  transform: translateX(100%);
+-  transition: transform 200ms ease;
+-  background: #0d181e;
+-  border-left: 1px solid var(--line);
+-}
+-.side-dock.drawer-open .camera-drawer { transform: translateX(0); }
+-.side-dock.dragging, .side-dock.dragging * { user-select: none; }
+-.side-dock.dragging .camera-drawer { transition: none; }
+-.drawer-header {
+-  position: relative;
+-  min-height: 60px;
+-  padding: 5px 58px 4px 12px;
+-  border-bottom: 1px solid var(--line);
+-}
+-.drawer-header .icon-button { position: absolute; right: 6px; top: 6px; }
+-.drawer-meta { min-width: 0; display: flex; align-items: center; gap: 8px; }
+-.profile-line { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+-.profile-line strong { color: var(--accent); }
+-.camera-controls-scroll {
+-  min-height: 0;
+-  overflow-y: auto;
+-  overscroll-behavior: contain;
+-  touch-action: pan-y;
+-  padding: 2px 8px 8px;
+-  scrollbar-gutter: stable;
+-}
+-.control-group h3 { position: sticky; top: 0; z-index: 1; margin: 0 -1px; padding: 4px 3px; background: #0d181ef2; color: var(--accent); font-size: 11px; letter-spacing: .08em; }
+-.control-row { padding: 5px 2px 6px; border-bottom: 1px solid var(--line); transition: background 120ms, box-shadow 120ms; }
+-.control-row.adjusting { background: #183a33; box-shadow: inset 3px 0 var(--accent); }
+-.control-head { display: flex; min-height: 20px; align-items: center; justify-content: space-between; gap: 8px; }
+-.control-head strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+-.control-value { flex: 0 0 auto; color: var(--blue); font-size: 13px; font-weight: 800; }
+-.control-inputs { display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px; gap: 5px; align-items: center; margin-top: 2px; }
+-.control-inputs button { min-width: 48px; padding: 0; font-size: 21px; }
+-.control-inputs input[type="range"] { width: 100%; height: 32px; margin: 0; accent-color: var(--accent); touch-action: pan-y; }
+-.control-diagnostic { margin-top: 1px; min-height: 14px; color: #f4d77b; font-size: 10px; line-height: 1.2; }
+-.control-diagnostic[hidden] { display: none; }
+-.control-diagnostic.failed { color: #ffaaa2; }
+-.controls-empty { margin: 18px 8px; color: var(--muted); text-align: center; }
+-.drawer-footer { width: 100%; min-width: 0; overflow: hidden; padding: 6px 8px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; border-top: 1px solid var(--line); background: #101c22; }
+-.drawer-footer button { min-width: 0; min-height: 48px; overflow: hidden; padding-inline: 5px; text-overflow: ellipsis; white-space: nowrap; }
+-.operation-result { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--muted); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+-
+-.modal-backdrop {
+-  position: fixed;
+-  z-index: 30;
+-  inset: 0;
+-  display: grid;
+-  place-items: center;
+-  padding: 16px;
+-  background: #000b;
+-}
+-.modal-backdrop[hidden] { display: none; }
+-.maintenance-menu, .confirm-dialog { width: min(100%, 380px); padding: 16px; display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 15px; background: #101b22; box-shadow: 0 20px 60px #0009; }
+-.maintenance-menu p, .confirm-dialog p { margin: 0 0 4px; color: var(--muted); }
+-.confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+-.stopped-overlay { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; background: #05090cf2; color: var(--accent); font-size: clamp(30px, 8vw, 72px); font-weight: 900; }
+-.stopped-overlay[hidden] { display: none; }
+-#toast { position: fixed; z-index: 60; left: 50%; bottom: 12px; transform: translateX(-50%); max-width: 90vw; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: #05090cf2; opacity: 0; pointer-events: none; transition: opacity 180ms; }
+-#toast.show { opacity: 1; }
+-
+-@media (max-height: 560px) and (orientation: landscape) {
+-  .dock-content { padding: 5px 10px 5px 16px; }
+-  .status-tags { gap: 3px; margin-bottom: 4px; }
+-  .telemetry-lines div { padding: 3px 7px; }
+-  .error-line { margin-top: 4px; min-height: 26px; max-height: 30px; padding-block: 4px; }
+-  .dock-section { margin-top: 4px; }
+-  .dock-section h2 { margin-bottom: 4px; }
+-  button { min-height: 48px; }
+-}
+-
+-@media (orientation: portrait), (max-width: 700px) {
+-  #appShell { grid-template-columns: 1fr; grid-template-rows: minmax(0, 56dvh) minmax(0, 44dvh); }
+-  .side-dock { border-left: 0; border-top: 1px solid var(--line); }
+-  .camera-drawer { transform: translateX(100%); }
+-  .dock-content { overflow-y: auto; overscroll-behavior: contain; }
+-  .dock-header { min-height: 58px; }
+-}
+-
+-@media (prefers-reduced-motion: reduce) {
+-  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+-}

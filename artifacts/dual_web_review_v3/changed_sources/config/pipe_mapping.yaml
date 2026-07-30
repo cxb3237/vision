@@ -1,0 +1,13 @@
+enabled: true
+
+marker_a:
+  name: hinge_blue
+  hsv_lower: [95, 80, 60]
+  hsv_upper: [135, 255, 255]
+  position_mm: -125.0
+
+marker_b:
+  name: servo_green
+  hsv_lower: [35, 80, 60]
+  hsv_upper: [90, 255, 255]
+  position_mm: 125.0

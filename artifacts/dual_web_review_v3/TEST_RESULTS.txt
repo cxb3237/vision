@@ -1,0 +1,64 @@
+# 完整验证结果
+
+$ python -m compileall -q .
+PASS，退出码 0；无错误输出。
+
+$ python -m pytest -q -rs
+PASS，退出码 0。
+结果：265 passed，2 skipped，耗时 10.17 秒。
+跳过项：
+- 当前 Python 子进程 PATH 没有系统 Node.js；独立 Node 命令已使用工作区 Node 完成。
+- Playwright 几何测试需要显式启用，且当前没有 Chromium 可执行文件。
+
+$ node --check web_competition/app.js
+PASS，退出码 0。
+
+$ node --check web_debug/static/app.js
+PASS，退出码 0。
+
+$ node --check web_debug/static/control_scheduler.js
+PASS，退出码 0。
+
+$ node --test tests/js/*.test.js
+PASS，退出码 0。
+结果：26 tests，19 passed，7 skipped，0 failed。
+通过项覆盖参数调度器、两站 MJPEG 重连和录像完成轮询。
+7 个跳过项均为真实浏览器布局用例；原因：Playwright Chromium 未安装。
+
+$ node --test tests/js/*.test.js（清空 NODE_PATH，模拟缺少 Playwright）
+PASS，退出码 0。
+结果：26 tests，19 passed，7 skipped，0 failed。
+跳过原因明确显示：Playwright 未安装：MODULE_NOT_FOUND。
+
+$ bash -n deploy/install_tablet_web.sh
+PASS，退出码 0。
+
+$ bash -n deploy/uninstall_tablet_web.sh
+PASS，退出码 0。
+
+$ bash -n deploy/hotspot/install_hotspot.sh
+PASS，退出码 0。
+
+$ bash -n deploy/hotspot/uninstall_hotspot.sh
+PASS，退出码 0。
+
+$ bash -n deploy/hotspot/hotspot_healthcheck.sh
+PASS，退出码 0。
+
+$ git diff --check
+PASS，退出码 0。
+
+$ git apply --check GIT_DIFF.patch（临时干净克隆）
+PASS，退出码 0。
+
+$ nginx -t
+NOT RUN：当前 Windows/WSL 开发环境未安装 nginx。
+
+$ systemd-analyze verify deploy/systemd/cxb-hotspot.service deploy/systemd/camera-debug-web.service
+ATTEMPTED：当前 WSL 存在 systemd-analyze，但源码模板仍含安装期 @PROJECT_DIR@/@USER@ 占位符，且 Windows 挂载权限不代表树莓派权限，因此原始模板校验返回非零。安装后的 unit 验证为 NOT RUN，必须在 Raspberry Pi 5 完成替换后执行。
+
+真实浏览器几何验证
+NOT RUN：当前无 Playwright Chromium 可执行文件，且会话没有可调用的内置浏览器控制工具。
+
+真实 Raspberry Pi 热点、摄像头、录像和平板播放
+NOT RUN：当前主机是 Windows 11，没有 Raspberry Pi 5 硬件。

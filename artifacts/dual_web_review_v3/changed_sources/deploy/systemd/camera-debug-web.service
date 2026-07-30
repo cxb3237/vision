@@ -1,0 +1,21 @@
+[Unit]
+Description=Camera Tablet Debug Web Proxy
+After=network.target cxb-hotspot.service
+Wants=cxb-hotspot.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@PROJECT_DIR@/.venv/bin/python -m web_debug.server --host 127.0.0.1 --port 8081 --backend http://127.0.0.1:8765
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+KillSignal=SIGINT
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
