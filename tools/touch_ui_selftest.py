@@ -22,7 +22,12 @@ ROOT = Path(__file__).resolve().parents[1]
 class _Runtime:
     def __init__(self) -> None:
         self.store = StateStore(
-            {"runtime_running": True, "competition_mode": False, "detector": "digit"}
+            {
+                "runtime_running": True,
+                "competition_mode": False,
+                "vision_output_enabled": False,
+                "detector": "steel_ball_yolo_ncnn",
+            }
         )
         self.commands = []
         self.camera = {
@@ -58,7 +63,7 @@ def run_selftest() -> None:
         runtime = _Runtime()
         api = TouchAPI(runtime)
         assert api.health()[1]["ok"]
-        assert api.status()[1]["status"]["detector"] == "digit"
+        assert api.status()[1]["status"]["detector"] == "steel_ball_yolo_ncnn"
         response = api.patch_camera({"controls": {"brightness": 25}})
         assert response[0] == 202
         assert runtime.commands[-1][0] == CommandType.SET_CAMERA_CONTROL
@@ -66,8 +71,8 @@ def run_selftest() -> None:
         persistence = RuntimeConfigStore(config)
         persistence.save_camera_override({"brightness": 25})
         assert persistence.load_camera_override() == {"brightness": 25}
-        persistence.save_ui_state(True, "digit")
-        assert persistence.load_ui_state()["competition_mode"] is True
+        persistence.save_ui_state(True)
+        assert persistence.load_ui_state()["competition_mode"] is False
         assert persistence.restore_baseline()
 
         stream = LatestFrameStream(max_fps=20, jpeg_quality=75, max_width=320)
@@ -79,7 +84,7 @@ def run_selftest() -> None:
         assert stream.get_latest_jpeg(placeholder=False)
         stream.stop()
 
-        runtime.store.update(competition_mode=True)
+        runtime.store.update(competition_mode=True, vision_output_enabled=True)
         assert api.patch_camera({"controls": {"brightness": 30}})[1][
             "error_code"
         ] == "COMPETITION_MODE"

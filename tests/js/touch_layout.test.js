@@ -5,10 +5,22 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
-const {chromium} = require("playwright");
+let chromium = null;
+let playwrightSkipReason = "";
+try {
+  ({chromium} = require("playwright"));
+} catch (error) {
+  playwrightSkipReason = `Playwright 未安装：${error.code || error.message}`;
+}
 
 const ROOT = path.resolve(__dirname, "../..");
-const WEB_ROOT = path.join(ROOT, "touch_ui_web");
+const WEB_ROOT = path.join(ROOT, "web_debug", "static");
+const browserExecutable = chromium
+  ? (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath())
+  : "";
+const HAS_BROWSER = !!chromium && fs.existsSync(browserExecutable);
+if (chromium && !HAS_BROWSER) playwrightSkipReason = "Playwright Chromium 未安装";
+const BROWSER_SKIP = HAS_BROWSER ? false : playwrightSkipReason;
 const baseControls = {
   brightness: {supported: true, writable: true, type: "int", minimum: -64, maximum: 64, step: 1, requested: 0, actual: 0, mismatch: false},
   contrast: {supported: true, writable: true, type: "int", minimum: 0, maximum: 64, step: 1, requested: 16, actual: 16, mismatch: false},
@@ -37,6 +49,13 @@ function createServer({patchFailure = false, applyDelayMs = 0, controlOverrides 
     commands: {},
     patches: [],
     nextCommand: 1,
+    competitionMode: false,
+    visionOutputEnabled: false,
+    serialOnline: true,
+    mcuReady: true,
+    positionTxHz: 0,
+    ballXmm: null,
+    uartState: "STOPPED",
   };
   Object.entries(controlOverrides).forEach(([name, override]) => {
     state.controls[name] = {...state.controls[name], ...override};
@@ -50,7 +69,7 @@ function createServer({patchFailure = false, applyDelayMs = 0, controlOverrides 
           delete command.appliedAt;
         }
       });
-      json(response, {ok: true, status: {runtime_running: true, camera_online: true, serial_online: true, vmc_tx_count: 3, detector: "digit", state: "LOCKED", fps: 30, commands: state.commands, ui: {parameter_debounce_ms: 20}}});
+      json(response, {ok: true, status: {runtime_running: true, camera_online: true, mcu_ready: state.mcuReady, serial_online: state.serialOnline, position_tx_count: 3, position_tx_hz: state.positionTxHz, ball_x_mm: state.ballXmm, uart_state: state.uartState, detector: "steel_ball_yolo_ncnn", state: "LOCKED", fps: 30, competition_mode: state.competitionMode, vision_output_enabled: state.visionOutputEnabled, commands: state.commands, ui: {parameter_debounce_ms: 20}}});
       return;
     }
     if (pathname === "/api/config/camera") {
@@ -99,9 +118,37 @@ function intersects(first, second) {
 }
 
 function launchBrowser() {
-  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
-  return chromium.launch({headless: true, ...(executablePath ? {executablePath} : {})});
+  return chromium.launch({headless: true, executablePath: browserExecutable});
 }
+
+test("vision output status is independent from UART online state", {timeout: 30000, skip: BROWSER_SKIP}, async (context) => {
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const browser = await launchBrowser();
+  context.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  const page = await browser.newPage({viewport: {width: 800, height: 480}});
+  await page.goto(`http://127.0.0.1:${server.address().port}/`, {waitUntil: "domcontentloaded"});
+  await page.waitForFunction(() => document.querySelector("#competitionBadge").textContent.includes("调试识别"));
+  assert.equal(await page.locator("#serialBadge").innerText(), "串口在线");
+  assert.equal(await page.locator("#competitionBadge").innerText(), "调试识别");
+  assert.equal(await page.locator("#positionTxBadge").innerText(), "已停止");
+
+  server.fixtureState.competitionMode = true;
+  server.fixtureState.visionOutputEnabled = true;
+  server.fixtureState.positionTxHz = 20;
+  server.fixtureState.ballXmm = 10;
+  await page.waitForFunction(() => document.querySelector("#competitionBadge").textContent.includes("比赛识别有效"));
+  assert.equal(await page.locator("#competitionBadge").innerText(), "比赛识别有效");
+  await page.waitForFunction(() => document.querySelector("#positionTxBadge").textContent === "位置下发运行中");
+
+  server.fixtureState.serialOnline = false;
+  server.fixtureState.positionTxHz = 0;
+  server.fixtureState.uartState = "DISCONNECTED";
+  await page.waitForFunction(() => document.querySelector("#positionTxBadge").textContent === "UART故障");
+});
 
 async function dispatchPointer(page, targetSelector, type, options) {
   return page.evaluate(({targetSelector, type, options}) => {
@@ -120,7 +167,7 @@ async function dispatchPointer(page, targetSelector, type, options) {
   }, {targetSelector, type, options});
 }
 
-test("drawer handle and panel geometry never overlap protected content", {timeout: 30000}, async (context) => {
+test("drawer handle and panel geometry never overlap protected content", {timeout: 30000, skip: BROWSER_SKIP}, async (context) => {
   const server = createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const browser = await launchBrowser();
@@ -135,7 +182,10 @@ test("drawer handle and panel geometry never overlap protected content", {timeou
 
   for (const viewport of [
     {width: 800, height: 480},
+    {width: 1024, height: 600},
     {width: 1280, height: 720},
+    {width: 1280, height: 800},
+    {width: 1920, height: 1080},
     {width: 720, height: 1280},
   ]) {
     await page.setViewportSize(viewport);
@@ -149,10 +199,12 @@ test("drawer handle and panel geometry never overlap protected content", {timeou
         handle: rect(document.querySelector("#drawerHandle")),
         protected: [...document.querySelectorAll(".status-tags > *, .telemetry-lines dt, .telemetry-lines dd, #lastError, #normalDock button")].map(rect),
         scroll: [document.documentElement.scrollHeight, document.documentElement.clientHeight, document.body.scrollHeight, document.body.clientHeight],
+        actions: [...document.querySelectorAll(".persistent-actions button")].map(rect),
       };
     });
     assert.ok(closed.protected.every((item) => !intersects(closed.handle, item)), `closed overlap at ${viewport.width}x${viewport.height}`);
     assert.deepEqual(closed.scroll, [viewport.height, viewport.height, viewport.height, viewport.height]);
+    assert.ok(closed.actions.every((item) => item.top >= 0 && item.bottom <= viewport.height));
 
     await page.getByRole("button", {name: "打开摄像头参数"}).click();
     await page.locator("[data-control=brightness]").waitFor({state: "visible"});
@@ -175,7 +227,7 @@ test("drawer handle and panel geometry never overlap protected content", {timeou
   }
 });
 
-test("touch range distinguishes vertical scrolling from horizontal adjustment", {timeout: 30000}, async (context) => {
+test("touch range distinguishes vertical scrolling from horizontal adjustment", {timeout: 30000, skip: BROWSER_SKIP}, async (context) => {
   const server = createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const browser = await launchBrowser();
@@ -233,7 +285,7 @@ test("touch range distinguishes vertical scrolling from horizontal adjustment", 
   assert.equal(server.fixtureState.patches.length, patchCountBeforeTap);
 });
 
-test("successful apply clears pending diagnostic with one render", {timeout: 30000}, async (context) => {
+test("successful apply clears pending diagnostic with one render", {timeout: 30000, skip: BROWSER_SKIP}, async (context) => {
   const server = createServer({applyDelayMs: 220});
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const browser = await launchBrowser();
@@ -272,7 +324,7 @@ test("successful apply clears pending diagnostic with one render", {timeout: 300
   assert.equal(renderAfter, renderBefore + 1);
 });
 
-test("failed apply keeps the Chinese failure diagnostic", {timeout: 30000}, async (context) => {
+test("failed apply keeps the Chinese failure diagnostic", {timeout: 30000, skip: BROWSER_SKIP}, async (context) => {
   const server = createServer({patchFailure: true});
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const browser = await launchBrowser();
@@ -295,7 +347,7 @@ test("failed apply keeps the Chinese failure diagnostic", {timeout: 30000}, asyn
   assert.equal(failed.pending, false);
 });
 
-test("requested and actual mismatch shows values without applying state", {timeout: 30000}, async (context) => {
+test("requested and actual mismatch shows values without applying state", {timeout: 30000, skip: BROWSER_SKIP}, async (context) => {
   const server = createServer({
     controlOverrides: {brightness: {requested: 20, actual: 18, mismatch: true}},
   });
@@ -316,7 +368,7 @@ test("requested and actual mismatch shows values without applying state", {timeo
   assert.doesNotMatch(await page.locator("#cameraControls").innerText(), /正在应用/);
 });
 
-test("compact controls are Chinese, writable-only and preserve mouse/button behavior", {timeout: 30000}, async (context) => {
+test("compact controls are Chinese, writable-only and preserve mouse/button behavior", {timeout: 30000, skip: BROWSER_SKIP}, async (context) => {
   const server = createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const browser = await launchBrowser();

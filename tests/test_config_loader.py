@@ -1,118 +1,41 @@
-"""YAML 配置加载和校验测试。"""
+from pathlib import Path
 
 import pytest
 import yaml
 
-import core.config_loader as config_loader
-
-from core.config_loader import (
-    ConfigError,
-    load_camera_config,
-    load_color_config,
-    load_mission_config,
-    load_calibration_config,
-    load_shape_config,
-)
+from core.config_loader import ConfigError, load_camera_config, load_mission_config, load_steel_ball_ncnn_config
 
 
-def test_configs() -> None:
-    assert "red" in load_color_config()
+def test_production_configs_load() -> None:
     assert load_camera_config().width == 640
-
-
-def test_missing(tmp_path) -> None:
-    with pytest.raises(ConfigError):
-        load_camera_config(tmp_path / "no.yaml")
-
-
-def test_bad(tmp_path) -> None:
-    path = tmp_path / "x.yaml"
-    path.write_text("device: 0", encoding="utf-8")
-    with pytest.raises(ConfigError):
-        load_camera_config(path)
-
-
-def test_optional_camera_properties_are_none() -> None:
-    config = load_camera_config()
-    assert config.gain is None
-    assert config.exposure is None
-    assert not config.auto_white_balance
-
-
-def test_mission_has_valid_tracker_and_timing_fields() -> None:
     mission = load_mission_config()
-    assert mission["max_jump_px"] > 0
-    assert 0 < mission["smoothing_alpha"] <= 1
-    assert mission["serial_queue_size"] == 64
+    assert mission["default_mode"] == "track"
+    assert mission["ball_uart"]["baudrate"] == 9600
+    assert load_steel_ball_ncnn_config().backend == "ncnn"
 
 
-def test_legacy_mission_without_serial_queue_size_falls_back_to_64(tmp_path) -> None:
-    data = yaml.safe_load((config_loader.PROJECT_ROOT / "config/mission.yaml").read_text(
-        encoding="utf-8"
-    ))
-    data.pop("serial_queue_size")
+def test_missing_config_is_clear(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="不存在"):
+        load_camera_config(tmp_path / "missing.yaml")
+
+
+def test_unknown_mission_field_is_rejected(tmp_path: Path) -> None:
+    data = yaml.safe_load(Path("config/mission.yaml").read_text(encoding="utf-8"))
+    data["serial_queue_size"] = 64
     path = tmp_path / "mission.yaml"
-    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-    assert load_mission_config(path)["serial_queue_size"] == 64
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ConfigError, match="serial_queue_size"):
+        load_mission_config(path)
 
 
-def test_invalid_calibrated_matrix_is_rejected(tmp_path) -> None:
-    path = tmp_path / "calibration.yaml"
-    path.write_text(
-        """calibrated: true
-image_width: 640
-image_height: 480
-camera_matrix: [[1, 0], [0, 1]]
-distortion_coefficients: [0, 0, 0, 0, 0]
-reprojection_error: 0.2
-rms_error: 0.3
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(ConfigError):
-        load_calibration_config(path)
-
-
-def test_shape_config_is_loaded_from_yaml() -> None:
-    config = load_shape_config()
-    assert config.canny_low < config.canny_high
-    assert config.min_area <= config.max_area
-
-
-def _write_calibration(path, *, width: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "calibrated": False,
-                "image_width": width,
-                "image_height": 480,
-                "camera_matrix": [],
-                "distortion_coefficients": [],
-                "reprojection_error": None,
-                "rms_error": None,
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_default_calibration_prefers_local_file(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(config_loader, "PROJECT_ROOT", tmp_path)
-    _write_calibration(tmp_path / "config/calibration.example.yaml", width=320)
-    _write_calibration(tmp_path / "config/calibration.yaml", width=800)
-    assert load_calibration_config().image_width == 800
-
-
-def test_default_calibration_falls_back_to_example(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(config_loader, "PROJECT_ROOT", tmp_path)
-    _write_calibration(tmp_path / "config/calibration.example.yaml", width=320)
-    assert load_calibration_config().image_width == 320
-
-
-def test_explicit_missing_custom_calibration_does_not_fall_back(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(config_loader, "PROJECT_ROOT", tmp_path)
-    _write_calibration(tmp_path / "config/calibration.example.yaml", width=320)
-    with pytest.raises(ConfigError, match="missing-custom.yaml"):
-        load_calibration_config("config/missing-custom.yaml")
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("send_rate_hz", 0), ("control_reconcile_interval_s", 0)],
+)
+def test_invalid_uart_calibration_or_rate_is_rejected(tmp_path: Path, name: str, value: object) -> None:
+    data = yaml.safe_load(Path("config/mission.yaml").read_text(encoding="utf-8"))
+    data["ball_uart"][name] = value
+    path = tmp_path / "mission.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ConfigError, match="ball_uart"):
+        load_mission_config(path)

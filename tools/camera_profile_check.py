@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 
-from core.config_loader import load_camera_config
+from core.config_loader import ConfigError, load_camera_config
 from drivers.v4l2_controls import (
     V4L2ControlError,
     apply_v4l2_controls,
@@ -26,15 +27,22 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def _parse_device(value: str | None) -> str | int | None:
     if value is None:
         return None
-    return int(value) if value.isdigit() else value
+    if value.isdigit():
+        return int(value)
+    if re.fullmatch(r"/dev/video\d+", value):
+        return value
+    raise ValueError("--device 必须为非负编号或 /dev/videoN")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
-    config = load_camera_config(
-        args.camera_config,
-        {"device": _parse_device(args.device)},
-    )
+    try:
+        device_override = _parse_device(args.device)
+        overrides = {"device": device_override} if device_override is not None else None
+        config = load_camera_config(args.camera_config, overrides)
+    except (ConfigError, ValueError) as exc:
+        print(f"配置错误: {exc}")
+        return 2
     profile = config.v4l2_controls or {}
     enabled = bool(profile.get("enabled", False))
     strict = bool(args.strict or profile.get("strict", False))

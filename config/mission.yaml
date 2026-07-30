@@ -1,22 +1,24 @@
-default_mode: idle
-detector: color
-target_color: red
-confirm_frames: 3
-lost_frames: 5
-serial_enabled: false
-serial_port: /dev/serial0
-serial_baudrate: 115200
-serial_send_rate_hz: 20
-serial_reconnect_interval_s: 1.0
-serial_queue_size: 64
-serial_strict: false
-heartbeat_hz: 10
-vision_result_hz: 20
-display: false
-save_debug_frames: false
-max_jump_px: 160
-smoothing_alpha: 0.45
-camera_frame_timeout_ms: 500
-serial_link_timeout_ms: 1000
-video_loop: false
-statistics_interval_s: 2.0
+default_mode: track
+camera_online_timeout_s: 1.0
+
+ball_uart:
+  enabled: true
+  port: /dev/ttyAMA0
+  baudrate: 9600
+  timeout_s: 0.02
+  write_timeout_s: 0.05
+  reconnect_interval_s: 1.0
+  # Maximum UART send rate; actual position updates are limited by valid vision frames.
+  send_rate_hz: 50
+  line_ending: "\r\n"
+  wait_ready: true
+  ping_interval_s: 1.0
+  status_interval_s: 1.0
+  link_timeout_s: 3.0
+  debug_position_interval_s: 0.2
+  statistics_interval_s: 1.0
+  control_reconcile_interval_s: 0.5
+  calibrated: false
+  left_endpoint_px: 72
+  right_endpoint_px: 568
+  servo_side: right

@@ -1,539 +1,209 @@
-"""YAML 配置读取、项目路径解析和明确校验。"""
+"""Strict YAML loaders for the production steel-ball runtime."""
 
 from __future__ import annotations
 
 from pathlib import Path
-import logging
 import math
 from typing import Any
 
 import yaml
 
-from core.models import (
-    CalibrationConfig,
-    CameraConfig,
-    DigitConfig,
-    ShapeConfig,
-    SteelBallConfig,
-)
+from core.models import CameraConfig, SteelBallNcnnConfig
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LOG = logging.getLogger(__name__)
-DEFAULT_CALIBRATION_PATH = Path("config/calibration.yaml")
-DEFAULT_CALIBRATION_EXAMPLE_PATH = Path("config/calibration.example.yaml")
 
 
 class ConfigError(ValueError):
-    """配置文件缺失、格式错误或字段值非法。"""
+    pass
 
 
 def resolve_config_path(path: str | Path) -> Path:
-    """将相对配置路径稳定解析到项目根目录。"""
-
-    candidate = Path(path).expanduser()
-    return candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
+    source = Path(path)
+    return source if source.is_absolute() else PROJECT_ROOT / source
 
 
 def _read(path: str | Path) -> dict[str, Any]:
-    resolved = resolve_config_path(path)
-    if not resolved.exists():
-        raise ConfigError(f"配置文件不存在: {resolved}")
+    source = resolve_config_path(path)
     try:
-        value = yaml.safe_load(resolved.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise ConfigError(f"无法读取 YAML {resolved}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ConfigError(f"配置根节点必须是映射: {resolved}")
-    return value
-
-
-def _required(data: dict[str, Any], keys: tuple[str, ...]) -> None:
-    missing = [key for key in keys if key not in data]
-    if missing:
-        raise ConfigError(f"缺少关键字段: {', '.join(missing)}")
-
-
-def _apply(data: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
-    if not overrides:
-        return data
-    return {**data, **{key: value for key, value in overrides.items() if value is not None}}
-
-
-def _positive_number(data: dict[str, Any], key: str) -> None:
-    value = data[key]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        raise ConfigError(f"字段 {key} 必须为正数")
-
-
-def load_camera_config(
-    path: str | Path = "config/camera.yaml",
-    overrides: dict[str, Any] | None = None,
-) -> CameraConfig:
-    """读取并校验摄像头配置。"""
-
-    data = _apply(_read(path), overrides)
-    _required(
-        data,
-        (
-            "device",
-            "width",
-            "height",
-            "fps",
-            "fourcc",
-            "buffer_size",
-            "manual_exposure",
-            "exposure",
-            "gain",
-            "auto_white_balance",
-            "brightness",
-            "contrast",
-            "reconnect_after_failures",
-        ),
-    )
-    for key in ("width", "height", "fps", "buffer_size", "reconnect_after_failures"):
-        _positive_number(data, key)
-    if not isinstance(data["device"], (str, int)) or isinstance(data["device"], bool):
-        raise ConfigError("字段 device 必须为字符串或整数")
-    if not isinstance(data["fourcc"], str) or len(data["fourcc"]) != 4:
-        raise ConfigError("字段 fourcc 必须是 4 个字符")
-    for key in ("exposure", "gain", "brightness", "contrast"):
-        value = data[key]
-        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
-            raise ConfigError(f"字段 {key} 必须为数值或 null")
-    v4l2_controls = data.get("v4l2_controls")
-    if v4l2_controls is not None:
-        if not isinstance(v4l2_controls, dict):
-            raise ConfigError("v4l2_controls 必须为映射或 null")
-        for flag in ("enabled", "strict"):
-            if flag in v4l2_controls and not isinstance(v4l2_controls[flag], bool):
-                raise ConfigError(f"v4l2_controls.{flag} 必须为布尔值")
-        for name, value in v4l2_controls.items():
-            if name in {"enabled", "strict"}:
-                continue
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int)
-            ):
-                raise ConfigError(f"v4l2_controls.{name} 必须为整数或 null")
-    try:
-        return CameraConfig(**data)
-    except TypeError as exc:
-        raise ConfigError(f"摄像头配置包含未知字段: {exc}") from exc
-
-
-def load_color_config(path: str | Path = "config/colors.yaml") -> dict[str, dict[str, Any]]:
-    """读取并完整校验所有 HSV 颜色配置。"""
-
-    data = _read(path)
-    for color, value in data.items():
-        if not isinstance(value, dict):
-            raise ConfigError(f"颜色 {color} 必须为映射")
-        _required(value, ("ranges", "min_area", "max_area", "morph_open", "morph_close"))
-        ranges = value["ranges"]
-        if not isinstance(ranges, list) or not ranges:
-            raise ConfigError(f"颜色 {color}.ranges 必须是非空列表")
-        for index, hsv_range in enumerate(ranges):
-            if not isinstance(hsv_range, dict):
-                raise ConfigError(f"颜色 {color}.ranges[{index}] 必须为映射")
-            for bound in ("lower", "upper"):
-                channels = hsv_range.get(bound)
-                if not isinstance(channels, list) or len(channels) != 3:
-                    raise ConfigError(f"颜色 {color}.ranges[{index}].{bound} 无效")
-                limits = (179, 255, 255)
-                if any(
-                    isinstance(channel, bool)
-                    or not isinstance(channel, int)
-                    or not 0 <= channel <= limits[position]
-                    for position, channel in enumerate(channels)
-                ):
-                    raise ConfigError(f"颜色 {color}.ranges[{index}].{bound} 超出 HSV 范围")
-        _positive_number(value, "min_area")
-        _positive_number(value, "max_area")
-        if value["min_area"] > value["max_area"]:
-            raise ConfigError(f"颜色 {color} 的 min_area 不能大于 max_area")
-        for key in ("morph_open", "morph_close"):
-            if not isinstance(value[key], int) or isinstance(value[key], bool) or value[key] < 0:
-                raise ConfigError(f"颜色 {color}.{key} 必须为非负整数")
+        data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ConfigError(f"配置文件不存在: {source}") from exc
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"YAML 无效: {source}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"配置根节点必须是映射: {source}")
     return data
 
 
-def load_mission_config(
-    path: str | Path = "config/mission.yaml",
-    overrides: dict[str, Any] | None = None,
-    colors_path: str | Path = "config/colors.yaml",
-) -> dict[str, Any]:
-    """读取并校验主程序实际使用的任务配置。"""
-
-    data = _apply(_read(path), overrides)
-    data.setdefault("serial_send_rate_hz", data.get("vision_result_hz", 20))
-    data.setdefault("serial_reconnect_interval_s", 1.0)
-    data.setdefault("serial_queue_size", 64)
-    data.setdefault("serial_strict", False)
-    required = (
-        "default_mode",
-        "detector",
-        "target_color",
-        "confirm_frames",
-        "lost_frames",
-        "max_jump_px",
-        "smoothing_alpha",
-        "camera_frame_timeout_ms",
-        "serial_link_timeout_ms",
-        "video_loop",
-        "statistics_interval_s",
-        "serial_enabled",
-        "serial_port",
-        "serial_baudrate",
-        "serial_send_rate_hz",
-        "serial_reconnect_interval_s",
-        "serial_queue_size",
-        "serial_strict",
-        "heartbeat_hz",
-        "vision_result_hz",
-        "display",
-        "save_debug_frames",
-    )
-    _required(data, required)
-    if data["default_mode"] not in {
-        "idle",
-        "search",
-        "track",
-        "calibration",
-    }:
-        raise ConfigError("default_mode 必须是当前已实现的 idle/search/track/calibration")
-    if data["detector"] not in {"color", "shape", "steel_ball", "digit"}:
-        raise ConfigError("detector 必须是 color、shape、steel_ball 或 digit")
-    for key in (
-        "confirm_frames",
-        "lost_frames",
-        "max_jump_px",
-        "camera_frame_timeout_ms",
-        "serial_link_timeout_ms",
-        "statistics_interval_s",
-        "serial_baudrate",
-        "serial_send_rate_hz",
-        "serial_reconnect_interval_s",
-        "serial_queue_size",
-        "heartbeat_hz",
-        "vision_result_hz",
-    ):
-        _positive_number(data, key)
-    if not isinstance(data["serial_queue_size"], int) or isinstance(
-        data["serial_queue_size"], bool
-    ):
-        raise ConfigError("serial_queue_size 必须为正整数")
-    if not isinstance(data["serial_strict"], bool):
-        raise ConfigError("serial_strict 必须为布尔值")
-    alpha = data["smoothing_alpha"]
-    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not 0 < alpha <= 1:
-        raise ConfigError("smoothing_alpha 必须在 (0, 1] 范围内")
-    colors = load_color_config(colors_path)
-    if data["target_color"] not in colors:
-        raise ConfigError(f"目标颜色不存在: {data['target_color']}")
-    return data
+def _reject_unknown(data: dict[str, Any], allowed: set[str], prefix: str) -> None:
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ConfigError(f"{prefix} 包含未知字段: {', '.join(unknown)}")
 
 
-def load_calibration_config(
-    path: str | Path = "config/calibration.yaml",
-) -> CalibrationConfig:
-    """读取相机标定配置。"""
-
-    resolved = resolve_config_path(path)
-    default_resolved = resolve_config_path(DEFAULT_CALIBRATION_PATH)
-    if resolved == default_resolved and not resolved.exists():
-        resolved = resolve_config_path(DEFAULT_CALIBRATION_EXAMPLE_PATH)
-    LOG.info("读取标定配置: %s", resolved)
-    data = _read(resolved)
-    _required(
-        data,
-        (
-            "calibrated",
-            "image_width",
-            "image_height",
-            "camera_matrix",
-            "distortion_coefficients",
-            "reprojection_error",
-        ),
-    )
-    if not isinstance(data["calibrated"], bool):
-        raise ConfigError("calibrated 必须为布尔值")
-    for key in ("image_width", "image_height"):
-        value = data[key]
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ConfigError(f"{key} 必须为正整数")
-    matrix = data["camera_matrix"]
-    distortion = data["distortion_coefficients"]
-    if data["calibrated"] or matrix:
-        if not (
-            isinstance(matrix, list)
-            and len(matrix) == 3
-            and all(isinstance(row, list) and len(row) == 3 for row in matrix)
-        ):
-            raise ConfigError("calibrated=true 时 camera_matrix 必须为 3x3 数组")
-    if data["calibrated"] or distortion:
-        if not isinstance(distortion, list) or len(distortion) not in (4, 5, 8, 12, 14):
-            raise ConfigError("畸变参数长度必须为 4、5、8、12 或 14")
-    numeric_values = [item for row in matrix for item in row] if matrix else []
-    numeric_values.extend(distortion if isinstance(distortion, list) else [])
-    if any(
-        isinstance(item, bool)
-        or not isinstance(item, (int, float))
-        or not math.isfinite(item)
-        for item in numeric_values
-    ):
-        raise ConfigError("标定矩阵和畸变参数必须全部为有限数值")
-    for key in ("reprojection_error", "rms_error"):
-        value = data.get(key)
-        if value is not None and (
-            isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
-            or not math.isfinite(value)
-        ):
-            raise ConfigError(f"{key} 必须为非负数或 null")
-    try:
-        return CalibrationConfig(**data)
-    except TypeError as exc:
-        raise ConfigError(f"标定配置包含未知字段: {exc}") from exc
-
-
-def load_shape_config(path: str | Path = "config/shapes.yaml") -> ShapeConfig:
-    """读取并校验传统形状检测参数。"""
-
+def load_camera_config(path: str | Path = "config/camera.yaml", overrides: dict[str, Any] | None = None) -> CameraConfig:
     data = _read(path)
-    required = (
-        "min_area",
-        "max_area",
-        "canny_low",
-        "canny_high",
-        "approximation_factor",
-        "square_ratio_tolerance",
-        "circle_threshold",
-    )
-    _required(data, required)
-    _positive_number(data, "min_area")
-    _positive_number(data, "max_area")
-    if data["min_area"] > data["max_area"]:
-        raise ConfigError("形状 min_area 不能大于 max_area")
-    for key in ("canny_low", "canny_high"):
-        value = data[key]
-        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 255:
-            raise ConfigError(f"{key} 必须为 0..255 整数")
-    if data["canny_low"] >= data["canny_high"]:
-        raise ConfigError("canny_low 必须小于 canny_high")
-    for key in ("approximation_factor", "square_ratio_tolerance", "circle_threshold"):
-        value = data[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < 1:
-            raise ConfigError(f"{key} 必须在 (0, 1) 范围内")
+    if overrides:
+        data.update(overrides)
+    allowed = set(CameraConfig.__dataclass_fields__)
+    _reject_unknown(data, allowed, "camera")
     try:
-        return ShapeConfig(**data)
+        config = CameraConfig(**data)
     except TypeError as exc:
-        raise ConfigError(f"形状配置包含未知字段: {exc}") from exc
-
-
-def load_digit_config(path: str | Path = "config/digit.yaml") -> DigitConfig:
-    """读取并逐字段校验单个印刷数字检测配置。"""
-
-    data = _read(path)
-    groups = ("roi", "preprocess", "candidate", "normalization", "matching", "tracking")
-    _required(data, groups)
-    for group in groups:
-        if not isinstance(data[group], dict):
-            raise ConfigError(f"digit.{group} 必须为映射")
-
-    roi = data["roi"]
-    _required(roi, ("enabled", "x", "y", "width", "height"))
-    if not isinstance(roi["enabled"], bool):
-        raise ConfigError("digit.roi.enabled 必须为布尔值")
-    for key in ("x", "y", "width", "height"):
-        value = roi[key]
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ConfigError(f"digit.roi.{key} 必须为整数")
-    if roi["x"] < 0 or roi["y"] < 0 or roi["width"] <= 0 or roi["height"] <= 0:
-        raise ConfigError("digit.roi 必须具有非负坐标和正数宽高")
-
-    preprocess = data["preprocess"]
-    _required(
-        preprocess,
-        (
-            "use_clahe",
-            "clahe_clip_limit",
-            "threshold_mode",
-            "fixed_threshold",
-            "adaptive_block_size",
-            "adaptive_c",
-            "invert",
-            "gaussian_kernel",
-            "morph_open",
-            "morph_close",
-        ),
-    )
-    for key in ("use_clahe", "invert"):
-        if not isinstance(preprocess[key], bool):
-            raise ConfigError(f"digit.preprocess.{key} 必须为布尔值")
-    if preprocess["threshold_mode"] not in {"fixed", "otsu", "adaptive"}:
-        raise ConfigError("digit.preprocess.threshold_mode 必须是 fixed、otsu 或 adaptive")
-    threshold = preprocess["fixed_threshold"]
-    if not isinstance(threshold, int) or isinstance(threshold, bool) or not 0 <= threshold <= 255:
-        raise ConfigError("digit.preprocess.fixed_threshold 必须为 0..255 整数")
-    clip_limit = preprocess["clahe_clip_limit"]
-    if isinstance(clip_limit, bool) or not isinstance(clip_limit, (int, float)) or clip_limit <= 0:
-        raise ConfigError("digit.preprocess.clahe_clip_limit 必须为正数")
-    block_size = preprocess["adaptive_block_size"]
-    if (
-        not isinstance(block_size, int)
-        or isinstance(block_size, bool)
-        or block_size < 3
-        or block_size % 2 == 0
-    ):
-        raise ConfigError("digit.preprocess.adaptive_block_size 必须为不小于 3 的奇数")
-    if isinstance(preprocess["adaptive_c"], bool) or not isinstance(
-        preprocess["adaptive_c"], (int, float)
-    ):
-        raise ConfigError("digit.preprocess.adaptive_c 必须为数值")
-    for key in ("gaussian_kernel", "morph_open", "morph_close"):
-        value = preprocess[key]
-        if (
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < 0
-            or (value > 0 and value % 2 == 0)
-        ):
-            raise ConfigError(f"digit.preprocess.{key} 必须为 0 或正奇数")
-
-    candidate = data["candidate"]
-    _required(
-        candidate,
-        (
-            "min_area_px",
-            "max_area_px",
-            "min_aspect_ratio",
-            "max_aspect_ratio",
-            "min_height_px",
-            "border_margin_px",
-        ),
-    )
-    for key in ("min_area_px", "max_area_px", "min_aspect_ratio", "max_aspect_ratio"):
-        value = candidate[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            raise ConfigError(f"digit.candidate.{key} 必须为正数")
-    if candidate["min_area_px"] > candidate["max_area_px"]:
-        raise ConfigError("digit.candidate.min_area_px 不能大于 max_area_px")
-    if candidate["min_aspect_ratio"] > candidate["max_aspect_ratio"]:
-        raise ConfigError("digit.candidate.min_aspect_ratio 不能大于 max_aspect_ratio")
-    for key in ("min_height_px", "border_margin_px"):
-        value = candidate[key]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ConfigError(f"digit.candidate.{key} 必须为非负整数")
-    if candidate["min_height_px"] <= 0:
-        raise ConfigError("digit.candidate.min_height_px 必须大于 0")
-
-    normalization = data["normalization"]
-    _required(normalization, ("width", "height", "padding_px", "center_by_moments"))
-    for key in ("width", "height", "padding_px"):
-        value = normalization[key]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ConfigError(f"digit.normalization.{key} 必须为非负整数")
-    if normalization["width"] <= 0 or normalization["height"] <= 0:
-        raise ConfigError("digit.normalization.width/height 必须大于 0")
-    if 2 * normalization["padding_px"] >= min(
-        normalization["width"], normalization["height"]
-    ):
-        raise ConfigError("digit.normalization.padding_px 对目标画布过大")
-    if not isinstance(normalization["center_by_moments"], bool):
-        raise ConfigError("digit.normalization.center_by_moments 必须为布尔值")
-
-    matching = data["matching"]
-    _required(
-        matching,
-        (
-            "template_root",
-            "min_score",
-            "min_score_margin",
-            "iou_weight",
-            "correlation_weight",
-        ),
-    )
-    if not isinstance(matching["template_root"], str) or not matching["template_root"].strip():
-        raise ConfigError("digit.matching.template_root 必须为非空路径")
-    template_root = resolve_config_path(matching["template_root"])
-    if not template_root.is_dir():
-        raise ConfigError(f"数字模板根目录不存在: {template_root}")
-    for key in ("min_score", "min_score_margin", "iou_weight", "correlation_weight"):
-        value = matching[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
-            raise ConfigError(f"digit.matching.{key} 必须在 0..1 范围内")
-    if matching["iou_weight"] + matching["correlation_weight"] <= 0:
-        raise ConfigError("digit.matching 的匹配权重之和必须大于 0")
-
-    tracking = data["tracking"]
-    _required(tracking, ("confirm_frames", "lost_frames", "vote_window"))
-    for key in ("confirm_frames", "lost_frames", "vote_window"):
-        value = tracking[key]
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ConfigError(f"digit.tracking.{key} 必须为正整数")
-
-    try:
-        return DigitConfig(**data)
-    except TypeError as exc:
-        raise ConfigError(f"数字配置包含未知或缺失字段: {exc}") from exc
-
-
-def load_steel_ball_config(path: str | Path = "config/steel_ball.yaml") -> SteelBallConfig:
-    """读取并严格校验钢球检测配置。"""
-
-    data = _read(path)
-    try:
-        config = SteelBallConfig(**data)
-    except TypeError as exc:
-        raise ConfigError(f"钢球配置包含未知或缺失字段: {exc}") from exc
-    if config.roi is not None:
-        if (
-            not isinstance(config.roi, list)
-            or len(config.roi) != 4
-            or any(not isinstance(value, int) or isinstance(value, bool) for value in config.roi)
-            or config.roi[2] <= 0
-            or config.roi[3] <= 0
-        ):
-            raise ConfigError("steel_ball.roi 必须为 null 或 [x, y, width, height] 正整数尺寸")
-    if config.known_diameter_mm <= 0:
-        raise ConfigError("known_diameter_mm 必须为正数")
-    if not 0 <= config.target_class <= 0xFFFF:
-        raise ConfigError("target_class 必须在 0..65535 范围内")
-    if config.threshold_mode not in {"fixed", "adaptive"}:
-        raise ConfigError("threshold_mode 必须是 fixed 或 adaptive")
-    if not 0 <= config.threshold <= 255:
-        raise ConfigError("threshold 必须在 0..255 范围内")
-    if config.adaptive_block_size < 3:
-        raise ConfigError("adaptive_block_size 必须至少为 3")
-    for name in ("gaussian_kernel", "morph_open", "morph_close"):
-        if getattr(config, name) < 0:
-            raise ConfigError(f"{name} 不能为负数")
-    positive_fields = (
-        "clahe_clip_limit",
-        "clahe_tile_grid_size",
-        "min_diameter_px",
-        "max_diameter_px",
-        "min_area_px",
-        "max_area_px",
-        "confirm_frames",
-        "lost_frames",
-        "max_jump_px",
-        "hough_dp",
-        "hough_min_dist",
-        "hough_param1",
-        "hough_param2",
-    )
-    for name in positive_fields:
+        raise ConfigError(f"camera 字段无效: {exc}") from exc
+    for name in ("width", "height", "fps", "buffer_size", "reconnect_after_failures"):
         value = getattr(config, name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            raise ConfigError(f"{name} 必须为正数")
-    if config.min_diameter_px > config.max_diameter_px:
-        raise ConfigError("min_diameter_px 不能大于 max_diameter_px")
-    if config.min_area_px > config.max_area_px:
-        raise ConfigError("min_area_px 不能大于 max_area_px")
-    if not 0 < config.min_circularity <= 1:
-        raise ConfigError("min_circularity 必须在 (0, 1] 范围内")
-    if not 0 < config.min_aspect_ratio <= config.max_aspect_ratio:
-        raise ConfigError("钢球宽高比范围无效")
-    if config.hough_min_radius < 0 or config.hough_max_radius < config.hough_min_radius:
-        raise ConfigError("Hough 半径范围无效")
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ConfigError(f"camera.{name} 必须为正整数")
+    if isinstance(config.device, bool) or not isinstance(config.device, (str, int)):
+        raise ConfigError("camera.device 必须是编号或设备路径")
+    if not isinstance(config.fourcc, str) or len(config.fourcc) != 4:
+        raise ConfigError("camera.fourcc 必须是 4 个字符")
+    for name in ("manual_exposure", "auto_white_balance"):
+        if not isinstance(getattr(config, name), bool):
+            raise ConfigError(f"camera.{name} 必须为布尔值")
+    if config.v4l2_controls is not None:
+        if not isinstance(config.v4l2_controls, dict):
+            raise ConfigError("camera.v4l2_controls 必须是映射")
+        for name in ("enabled", "strict"):
+            value = config.v4l2_controls.get(name, False)
+            if not isinstance(value, bool):
+                raise ConfigError(f"camera.v4l2_controls.{name} 必须为布尔值")
+        for name, value in config.v4l2_controls.items():
+            if name in {"enabled", "strict"} or value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigError(f"camera.v4l2_controls.{name} 必须为整数或 null")
     return config
+
+
+def load_mission_config(path: str | Path = "config/mission.yaml", overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = _read(path)
+    if overrides:
+        data.update(overrides)
+    runtime_defaults = {
+        "confirm_frames": 3,
+        "lost_frames": 5,
+        "max_jump_px": 160.0,
+        "smoothing_alpha": 0.45,
+        "camera_online_timeout_s": 1.0,
+    }
+    _reject_unknown(data, {"default_mode", "ball_uart", *runtime_defaults}, "mission")
+    if data.get("default_mode") != "track":
+        raise ConfigError("mission.default_mode 必须为 track")
+    profile = data.get("ball_uart")
+    if not isinstance(profile, dict):
+        raise ConfigError("mission.ball_uart 必须是映射")
+    defaults: dict[str, Any] = {
+        "enabled": True,
+        "port": "/dev/ttyAMA0",
+        "baudrate": 9600,
+        "timeout_s": 0.02,
+        "write_timeout_s": 0.05,
+        "reconnect_interval_s": 1.0,
+        "send_rate_hz": 50.0,
+        "line_ending": "\r\n",
+        "wait_ready": True,
+        "ping_interval_s": 1.0,
+        "status_interval_s": 1.0,
+        "link_timeout_s": 3.0,
+        "debug_position_interval_s": 0.2,
+        "statistics_interval_s": 1.0,
+        "control_reconcile_interval_s": 0.5,
+        "calibrated": False,
+        "left_endpoint_px": 72,
+        "right_endpoint_px": 568,
+        "servo_side": "right",
+    }
+    _reject_unknown(profile, set(defaults), "mission.ball_uart")
+    for name, value in defaults.items():
+        profile.setdefault(name, value)
+    for name in ("enabled", "wait_ready", "calibrated"):
+        if not isinstance(profile[name], bool):
+            raise ConfigError(f"mission.ball_uart.{name} 必须为布尔值")
+    if not isinstance(profile["port"], str) or not profile["port"].strip():
+        raise ConfigError("mission.ball_uart.port 不能为空")
+    for name in (
+        "baudrate", "timeout_s", "write_timeout_s", "reconnect_interval_s",
+        "send_rate_hz", "ping_interval_s", "status_interval_s", "link_timeout_s",
+        "debug_position_interval_s", "statistics_interval_s",
+        "control_reconcile_interval_s",
+    ):
+        value = profile[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(f"mission.ball_uart.{name} 必须为正数")
+    for name in ("left_endpoint_px", "right_endpoint_px"):
+        if isinstance(profile[name], bool) or not isinstance(profile[name], (int, float)):
+            raise ConfigError(f"mission.ball_uart.{name} 必须为数值")
+    if not isinstance(profile["servo_side"], str):
+        raise ConfigError("mission.ball_uart.servo_side 必须为字符串")
+    if profile["line_ending"] != "\r\n":
+        raise ConfigError("mission.ball_uart.line_ending 必须为 CRLF")
+    for name, value in runtime_defaults.items():
+        data.setdefault(name, value)
+    for name in ("confirm_frames", "lost_frames"):
+        if isinstance(data[name], bool) or not isinstance(data[name], int) or data[name] <= 0:
+            raise ConfigError(f"mission.{name} 必须为正整数")
+    if data["max_jump_px"] <= 0:
+        raise ConfigError("mission.max_jump_px 必须为正数")
+    if not 0 < data["smoothing_alpha"] <= 1:
+        raise ConfigError("mission.smoothing_alpha 必须在 (0, 1] 范围内")
+    timeout = data["camera_online_timeout_s"]
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(float(timeout))
+        or timeout <= 0
+    ):
+        raise ConfigError("mission.camera_online_timeout_s 必须为有限正数")
+    return data
+
+
+def load_steel_ball_ncnn_config(path: str | Path = "config/steel_ball_ncnn.yaml") -> SteelBallNcnnConfig:
+    data = _read(path)
+    allowed = set(SteelBallNcnnConfig.__dataclass_fields__)
+    _reject_unknown(data, allowed, "steel_ball_ncnn")
+    try:
+        config = SteelBallNcnnConfig(**data)
+    except TypeError as exc:
+        raise ConfigError(f"steel_ball_ncnn 字段无效: {exc}") from exc
+    if config.backend != "ncnn":
+        raise ConfigError("steel_ball_ncnn.backend 必须为 ncnn")
+    model_path = Path(config.model_path)
+    if not model_path.is_absolute():
+        model_path = PROJECT_ROOT / model_path
+    config.model_path = str(model_path.resolve())
+    if isinstance(config.imgsz, bool) or not isinstance(config.imgsz, int) or config.imgsz <= 0:
+        raise ConfigError("steel_ball_ncnn.imgsz 必须为正整数")
+    for name in ("conf_threshold", "iou_threshold"):
+        value = getattr(config, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise ConfigError(f"steel_ball_ncnn.{name} 必须在 0..1 范围内")
+    if isinstance(config.max_det, bool) or not isinstance(config.max_det, int) or not 1 <= config.max_det <= 100:
+        raise ConfigError("steel_ball_ncnn.max_det 必须在 1..100 范围内")
+    if isinstance(config.num_threads, bool) or not isinstance(config.num_threads, int) or not 1 <= config.num_threads <= 4:
+        raise ConfigError("steel_ball_ncnn.num_threads 必须在 1..4 范围内")
+    if isinstance(config.target_class, bool) or not isinstance(config.target_class, int):
+        raise ConfigError("steel_ball_ncnn.target_class 必须为整数")
+    if not isinstance(config.debug_tensor_shapes, bool):
+        raise ConfigError("steel_ball_ncnn.debug_tensor_shapes 必须为布尔值")
+    return config
+
+
+def load_pipe_mapping_config(path: str | Path = "config/pipe_mapping.yaml") -> dict[str, Any]:
+    data = _read(path)
+    for name in ("enabled", "marker_a", "marker_b"):
+        if name not in data:
+            raise ConfigError(f"pipe_mapping 缺少必要字段: {name}")
+    for marker_name in ("marker_a", "marker_b"):
+        marker = data[marker_name]
+        if not isinstance(marker, dict):
+            raise ConfigError(f"pipe_mapping.{marker_name} 必须是映射")
+        for name in ("name", "hsv_lower", "hsv_upper", "position_mm"):
+            if name not in marker:
+                raise ConfigError(f"pipe_mapping.{marker_name} 缺少必要字段: {name}")
+        for name in ("hsv_lower", "hsv_upper"):
+            if not isinstance(marker[name], list) or len(marker[name]) != 3:
+                raise ConfigError(f"pipe_mapping.{marker_name}.{name} 必须包含 3 个值")
+    return data

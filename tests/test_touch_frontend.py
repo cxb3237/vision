@@ -4,9 +4,22 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HTML = (ROOT / "touch_ui_web/index.html").read_text(encoding="utf-8")
-CSS = (ROOT / "touch_ui_web/style.css").read_text(encoding="utf-8")
-JS = (ROOT / "touch_ui_web/app.js").read_text(encoding="utf-8")
+
+
+def test_web_is_steel_ball_only_and_never_uses_browser_serial() -> None:
+    html = (ROOT / "web_debug/static/index.html").read_text(encoding="utf-8")
+    javascript = (ROOT / "web_debug/static/app.js").read_text(encoding="utf-8")
+    server = (ROOT / "touch_ui/server.py").read_text(encoding="utf-8")
+    combined = html + javascript
+    assert "steelBallStatus" in html
+    assert "ballPixelPosition" in html
+    assert "mcuFields" in html and "lastSentPosition" in html
+    assert 'id="mcuStatus"' not in html
+    assert "navigator.serial" not in combined
+    assert "/api/detector" not in server
+HTML = (ROOT / "web_debug/static/index.html").read_text(encoding="utf-8")
+CSS = (ROOT / "web_debug/static/style.css").read_text(encoding="utf-8")
+JS = (ROOT / "web_debug/static/app.js").read_text(encoding="utf-8")
 
 
 def test_page_is_fixed_viewport_with_non_overlapping_side_dock() -> None:
@@ -105,9 +118,37 @@ def test_maintenance_requires_long_press_and_danger_confirmation() -> None:
     assert 'maintenanceButton").addEventListener("pointerdown"' in JS
     assert "confirmDanger(" in JS
     assert 'request("/api/runtime/stop"' in JS
-    assert 'request("/api/kiosk/exit"' in JS
+    assert 'id="exitKiosk"' not in HTML
+    assert "/api/kiosk/exit" not in JS
 
 
 def test_portrait_layout_keeps_preview_above_dock() -> None:
     assert "@media (orientation: portrait), (max-width: 700px)" in CSS
     assert "grid-template-rows: minmax(0, 56dvh) minmax(0, 44dvh)" in CSS
+
+
+def test_performance_panel_prefers_vision_fps_with_legacy_fallback() -> None:
+    assert "status.vision_fps ?? status.fps ?? 0" in JS
+    assert 'id="cameraFps"' in HTML
+    assert 'id="previewFps"' in HTML
+    assert 'id="pipelineFps"' in HTML
+    assert 'id="pipelineLatency"' in HTML
+    assert 'id="pipelineDrops"' in HTML
+
+
+def test_frontend_displays_calibration_error_and_real_uart_rates() -> None:
+    assert "ball_position_calibration_error" in JS
+    assert "position_tx_hz" in JS
+    assert "invalid_tx_hz" in JS
+    assert '["S", "F", "EN", "X", "V", "E", "RQ", "AP", "PW", "AGE", "ST", "AC", "RJ"]' in JS
+    assert 'request("/debug/events")' in JS
+    assert 'id="eventLog"' in HTML
+
+
+def test_performance_panel_keeps_ncnn_and_end_to_end_latency_distinct() -> None:
+    assert "status.inference_ms" in JS
+    assert "status.inference_median_ms" in JS
+    assert "status.inference_p95_ms" in JS
+    assert "status.capture_to_result_ms" in JS
+    assert "status.capture_to_result_p95_ms" in JS
+    assert "status.preview_overwritten_count" in JS

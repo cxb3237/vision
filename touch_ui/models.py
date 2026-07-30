@@ -15,6 +15,20 @@ class TouchUIConfigError(ValueError):
     """触摸界面配置字段无效。"""
 
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def validate_loopback_host(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TouchUIConfigError("touch_ui.server.host 必须为非空字符串")
+    host = value.strip().lower()
+    if host not in LOOPBACK_HOSTS:
+        raise TouchUIConfigError(
+            "touch_ui.server.host 仅允许本机回环地址: 127.0.0.1、localhost 或 ::1"
+        )
+    return host
+
+
 class CommandStatus(str, Enum):
     QUEUED = "QUEUED"
     APPLYING = "APPLYING"
@@ -24,7 +38,6 @@ class CommandStatus(str, Enum):
 
 class CommandType(str, Enum):
     SET_CAMERA_CONTROL = "SET_CAMERA_CONTROL"
-    SELECT_DETECTOR = "SELECT_DETECTOR"
     SAVE_RUNTIME = "SAVE_RUNTIME"
     RESTORE_LAST_GOOD = "RESTORE_LAST_GOOD"
     RESTORE_BASELINE = "RESTORE_BASELINE"
@@ -64,7 +77,6 @@ class TouchUIConfig:
     preview_max_fps: float
     jpeg_quality: int
     preview_max_width: int
-    startup_detector: str
     restore_runtime_overrides: bool
     startup_competition_mode: bool
     status_poll_interval_ms: int
@@ -146,11 +158,7 @@ def load_touch_ui_config(
     runtime = _mapping(raw, "runtime")
     _required(server, "server", ("host", "port"))
     _required(preview, "preview", ("max_fps", "jpeg_quality", "max_width"))
-    _required(
-        startup,
-        "startup",
-        ("detector", "restore_runtime_overrides", "competition_mode"),
-    )
+    _required(startup, "startup", ("restore_runtime_overrides", "competition_mode"))
     _required(
         ui,
         "ui",
@@ -161,17 +169,13 @@ def load_touch_ui_config(
         "runtime",
         ("directory", "camera_override_file", "ui_state_file", "backup_directory"),
     )
-    if not isinstance(server["host"], str) or not server["host"].strip():
-        raise TouchUIConfigError("touch_ui.server.host 必须为非空字符串")
+    host = validate_loopback_host(server["host"])
     port = _integer_range(server, "server", "port", 1, 65535)
     max_fps = preview["max_fps"]
     if isinstance(max_fps, bool) or not isinstance(max_fps, (int, float)) or not 0 < max_fps <= 60:
         raise TouchUIConfigError("touch_ui.preview.max_fps 必须在 (0, 60] 范围内")
     jpeg_quality = _integer_range(preview, "preview", "jpeg_quality", 1, 100)
     max_width = _integer_range(preview, "preview", "max_width", 160, 4096)
-    detector = startup["detector"]
-    if detector not in {"color", "shape", "steel_ball", "digit"}:
-        raise TouchUIConfigError("touch_ui.startup.detector 无效")
     for name in ("restore_runtime_overrides", "competition_mode"):
         if not isinstance(startup[name], bool):
             raise TouchUIConfigError(f"touch_ui.startup.{name} 必须为布尔值")
@@ -195,12 +199,11 @@ def load_touch_ui_config(
         backup_directory.mkdir(parents=True, exist_ok=True)
 
     return TouchUIConfig(
-        host=server["host"].strip(),
+        host=host,
         port=port,
         preview_max_fps=float(max_fps),
         jpeg_quality=jpeg_quality,
         preview_max_width=max_width,
-        startup_detector=detector,
         restore_runtime_overrides=startup["restore_runtime_overrides"],
         startup_competition_mode=startup["competition_mode"],
         status_poll_interval_ms=poll,

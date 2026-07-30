@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>钢球平板调试台</title>
+  <link rel="stylesheet" href="/style.css?v=6">
+</head>
+<body>
+  <div id="appShell">
+    <section id="previewPane" class="preview-pane" aria-label="实时摄像头预览">
+      <img id="preview" alt="实时标注画面">
+      <div class="preview-overlay">摄像头 <b id="cameraFps">0.0</b> / 识别 <b id="fps">0.0</b> / 预览 <b id="previewFps">0.0</b></div>
+      <div id="debugStreamNotice" class="debug-stream-notice">
+        <strong id="debugStreamNoticeTitle">调试视频流正在连接</strong>
+        <span id="debugStreamNoticeDetail">正在自动建立实时画面。</span>
+      </div>
+    </section>
+
+    <aside id="sideDock" class="side-dock">
+      <header class="dock-header">
+        <div class="dock-title"><span class="eyebrow">钢球调试</span><h1>钢球位置</h1></div>
+        <button id="drawerHandle" class="icon-button drawer-handle" aria-label="打开摄像头参数" aria-expanded="false"><span>‹</span></button>
+        <button id="maintenanceButton" class="icon-button maintenance-button" aria-label="长按打开维护菜单"><span>⋮</span><i id="maintenanceProgress"></i></button>
+      </header>
+
+      <section class="always-status" aria-label="关键状态">
+        <div class="status-tags">
+          <span id="runningBadge" class="status-tag offline">服务已停止</span>
+          <span id="cameraBadge" class="status-tag offline">摄像头离线</span>
+          <span id="serialBadge" class="status-tag offline">串口离线</span>
+          <span id="mcuBadge" class="status-tag warning">MCU 未就绪</span>
+        </div>
+        <section class="ball-position-card" aria-label="钢球横向位置">
+          <span>钢球毫米位置</span><strong id="ballPosition">-- mm</strong>
+          <small id="ballDetected">未识别</small>
+        </section>
+        <dl class="key-grid">
+          <div><dt>S 控制状态</dt><dd id="keyS">--</dd></div>
+          <div><dt>F 故障码</dt><dd id="keyF">--</dd></div>
+          <div><dt>EN 闭环使能</dt><dd id="keyEN">--</dd></div>
+          <div><dt>AGE 帧龄/ms</dt><dd id="keyAGE">--</dd></div>
+          <div class="tx-state"><dt>位置下发</dt><dd id="positionTxBadge">未请求位置下发</dd></div>
+          <div><dt>position_tx_hz</dt><dd id="positionTxRate">0.0 Hz</dd></div>
+        </dl>
+      </section>
+
+      <div id="normalDock" class="dock-content">
+        <section class="normal-info" aria-label="普通信息">
+          <h2>现场信息</h2>
+          <dl class="telemetry-lines">
+            <div><dt>像素 X</dt><dd id="ballPixelPosition">—</dd></div>
+            <div><dt>识别置信度</dt><dd id="ballConfidence">0.0%</dd></div>
+            <div><dt>标定状态</dt><dd id="mappingState">未标定</dd></div>
+            <div><dt>camera FPS</dt><dd id="cameraFpsDetail">0.0</dd></div>
+            <div><dt>vision FPS</dt><dd id="visionFpsDetail">0.0</dd></div>
+            <div><dt>AC 接受帧数</dt><dd id="keyAC">--</dd></div>
+            <div><dt>RJ 拒绝帧数</dt><dd id="keyRJ">--</dd></div>
+          </dl>
+          <div id="lastError" class="error-line">无UART错误</div>
+        </section>
+
+        <details class="advanced-info">
+          <summary>高级信息</summary>
+          <dl class="telemetry-lines">
+            <div><dt>最新帧年龄</dt><dd id="latestFrameAge">--</dd></div>
+            <div><dt>位置包发送</dt><dd id="txCount">0</dd></div>
+            <div><dt>UART状态</dt><dd id="uartState">串口未打开</dd></div>
+            <div><dt>UART端口</dt><dd id="uartPortState">未打开</dd></div>
+            <div><dt>MCU READY</dt><dd id="mcuReadyState">否</dd></div>
+            <div><dt>最近发送位置</dt><dd id="lastSentPosition">--</dd></div>
+            <div><dt>INVALID实际发送</dt><dd id="invalidTxRate">0.0 Hz</dd></div>
+            <div><dt>摄像头 / 识别 / 预览</dt><dd id="pipelineFps">0 / 0 / 0 FPS</dd></div>
+            <div><dt>捕获到结果 当前 / P95</dt><dd id="pipelineLatency">0 / 0 ms</dd></div>
+            <div><dt>跳帧 / 预览覆盖</dt><dd id="pipelineDrops">0 / 0</dd></div>
+            <div><dt>标定错误</dt><dd id="calibrationError">--</dd></div>
+            <div><dt>左右端像素</dt><dd><span id="leftEndpoint">--</span> / <span id="rightEndpoint">--</span></dd></div>
+            <div><dt>舵机方向</dt><dd id="servoSide">--</dd></div>
+          </dl>
+          <section class="dock-section">
+            <h2>MCU详细字段</h2>
+            <dl id="mcuFields" class="mcu-grid"></dl>
+          </section>
+          <dl id="steelBallStatus" class="telemetry-lines">
+            <div><dt>识别后端</dt><dd id="steelBallBackend">—</dd></div>
+            <div><dt>模型</dt><dd id="steelBallModel">—</dd></div>
+            <div><dt>NCNN 当前 / 中位 / P95</dt><dd id="steelBallTiming">0 / 0 / 0 ms</dd></div>
+            <div><dt>捕获到结果 当前 / P95</dt><dd id="steelBallE2E">0 / 0 ms</dd></div>
+          </dl>
+          <section class="dock-section event-section">
+            <h2>最近事件</h2>
+            <ol id="eventLog" class="event-log"><li>等待调试代理状态</li></ol>
+          </section>
+          <span id="dirtyBadge" class="status-tag">配置未修改</span>
+          <span id="competitionBadge" class="status-tag">调试识别</span>
+        </details>
+      </div>
+
+      <footer class="persistent-actions">
+        <button id="showCamera" class="primary">摄像头参数</button>
+        <button id="enterCompetition" class="danger">启用位置下发</button>
+      </footer>
+
+      <section id="cameraPanel" class="camera-drawer" aria-hidden="true">
+        <header class="drawer-header">
+          <div><span class="eyebrow">现场设置</span><h2>摄像头参数</h2></div>
+          <div class="drawer-meta">
+            <div class="profile-line">当前配置：<strong id="currentProfile">读取中</strong></div>
+            <div id="operationResult" class="operation-result" aria-live="polite"></div>
+          </div>
+          <button id="closeCamera" class="icon-button" aria-label="关闭参数面板">×</button>
+        </header>
+        <div id="cameraControls" class="camera-controls-scroll"></div>
+        <footer class="drawer-footer">
+          <button id="saveRuntime" class="primary" aria-label="保存现场参数" title="保存现场参数">保存</button>
+          <button id="restoreLast" aria-label="恢复上次有效参数" title="恢复上次有效参数">上次</button>
+          <button id="restoreBaseline" class="danger" aria-label="恢复启动基准参数" title="恢复启动基准参数">基准</button>
+        </footer>
+      </section>
+    </aside>
+  </div>
+
+  <div id="maintenanceMenu" class="modal-backdrop" hidden>
+    <section class="maintenance-menu" role="dialog" aria-modal="true" aria-labelledby="maintenanceTitle">
+      <h2 id="maintenanceTitle">维护菜单</h2><p>危险操作需要再次确认。</p>
+      <button id="reloadPage">重新加载页面</button>
+      <button id="maintenanceExitCompetition">退出比赛模式</button>
+      <button id="stopRuntime" class="danger solid">停止视觉程序</button>
+      <button id="closeMaintenance">取消</button>
+    </section>
+  </div>
+  <div id="confirmDialog" class="modal-backdrop" hidden>
+    <section class="confirm-dialog" role="alertdialog" aria-modal="true">
+      <h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p>
+      <div class="confirm-actions"><button id="confirmCancel">取消</button><button id="confirmAccept" class="danger solid">确认</button></div>
+    </section>
+  </div>
+  <div id="stoppedOverlay" class="stopped-overlay" hidden>视觉服务已停止</div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/mjpeg_reconnect.js?v=7"></script>
+  <script src="/control_scheduler.js?v=7"></script>
+  <script src="/app.js?v=7"></script>
+</body>
+</html>

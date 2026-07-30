@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import http.client
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ from touch_ui.models import (
     load_touch_ui_config,
 )
 from touch_ui.runtime_config import RuntimeConfigStore
+from touch_ui.server import TouchUIServer
 from touch_ui.state_store import StateStore
 
 
@@ -36,7 +38,12 @@ def touch_config(tmp_path: Path):
 
 class FakeRuntime:
     def __init__(self) -> None:
-        self.state = {"runtime_running": True, "competition_mode": False, "detector": "digit"}
+        self.state = {
+            "runtime_running": True,
+            "competition_mode": False,
+            "vision_output_enabled": False,
+            "detector": "steel_ball_yolo_ncnn",
+        }
         self.config = {
             "controls": {
                 "brightness": {
@@ -102,6 +109,47 @@ def test_touch_config_rejects_absolute_runtime_path(tmp_path) -> None:
         load_touch_ui_config(path, project_root=tmp_path)
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.20", "8.8.8.8"])
+def test_touch_config_rejects_non_loopback_host(tmp_path, host) -> None:
+    data = yaml.safe_load(PROJECT_CONFIG.read_text(encoding="utf-8"))
+    data["server"]["host"] = host
+    path = tmp_path / "bad-host.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(TouchUIConfigError, match="回环"):
+        load_touch_ui_config(path, project_root=tmp_path)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_touch_config_accepts_only_supported_loopback_hosts(tmp_path, host) -> None:
+    data = yaml.safe_load(PROJECT_CONFIG.read_text(encoding="utf-8"))
+    data["server"]["host"] = host
+    path = tmp_path / "loopback.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    assert load_touch_ui_config(path, project_root=tmp_path).host == host
+
+
+@pytest.mark.parametrize(("content_length", "expected_status"), [("-1", 400), ("65537", 413)])
+def test_http_rejects_invalid_or_oversized_content_length(
+    tmp_path, content_length, expected_status
+) -> None:
+    config = replace(touch_config(tmp_path), host="127.0.0.1", port=0)
+    server = TouchUIServer(FakeRuntime(), config)
+    server.start()
+    try:
+        assert server._server is not None
+        port = int(server._server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.putrequest("POST", "/api/competition/enter")
+        connection.putheader("Content-Length", content_length)
+        connection.endheaders()
+        response = connection.getresponse()
+        assert response.status == expected_status
+        response.read()
+        connection.close()
+    finally:
+        server.stop()
+
+
 def test_state_snapshot_is_thread_safe_and_serializable() -> None:
     store = StateStore({"count": 0, "nested": {"value": 0}})
 
@@ -156,7 +204,7 @@ def test_competition_mode_blocks_modifications_but_exit_is_queued() -> None:
     runtime.state["competition_mode"] = True
     api = TouchAPI(runtime)
     assert api.patch_camera({"controls": {"brightness": 30}})[1]["error_code"] == "COMPETITION_MODE"
-    assert api.select_detector({"detector": "color"})[1]["error_code"] == "COMPETITION_MODE"
+    assert not hasattr(api, "select_detector")
     assert api.command(CommandType.EXIT_COMPETITION)[0] == 202
 
 
@@ -201,12 +249,118 @@ def test_preview_recovers_after_placeholder_without_recreating_source() -> None:
     assert recovered and recovered != placeholder
 
 
+def test_preview_statistics_count_submissions_and_pending_overwrites() -> None:
+    stream = LatestFrameStream(max_fps=20)
+    frame = np.zeros((40, 60, 3), np.uint8)
+    stream.submit_frame(frame)
+    stream.submit_frame(frame)
+    statistics = stream.get_statistics()
+    assert statistics["preview_submitted_count"] == 2
+    assert statistics["preview_overwritten_count"] == 1
+    assert statistics["preview_pending"] is True
+
+
+def test_preview_statistics_measure_encoding_rate_age_and_size() -> None:
+    stream = LatestFrameStream(max_fps=30)
+    stream.start()
+    for value in (10, 20):
+        stream.submit_frame(np.full((40, 60, 3), value, np.uint8))
+        deadline = time.monotonic() + 1
+        expected = value // 10
+        while stream.encoded_count < expected and time.monotonic() < deadline:
+            time.sleep(0.005)
+    statistics = stream.get_statistics()
+    stream.stop()
+    assert statistics["preview_encoded_count"] >= 2
+    assert statistics["preview_fps"] > 0
+    assert statistics["preview_encode_ms"] >= 0
+    assert statistics["preview_encode_p95_ms"] >= statistics["preview_encode_median_ms"]
+    assert statistics["preview_age_ms"] >= 0
+    assert statistics["preview_jpeg_bytes"] > 0
+
+
+def test_preview_get_statistics_is_thread_safe_under_submission() -> None:
+    stream = LatestFrameStream(max_fps=30)
+    stream.start()
+    frame = np.zeros((20, 30, 3), np.uint8)
+    threads = [threading.Thread(target=lambda: [stream.submit_frame(frame) for _ in range(20)]) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    statistics = stream.get_statistics()
+    stream.stop()
+    assert statistics["preview_submitted_count"] == 60
+    assert statistics["preview_overwritten_count"] >= 1
+
+
+def test_preview_clear_buffers_is_rejected_while_encoder_is_running() -> None:
+    stream = LatestFrameStream(max_fps=20)
+    stream.start()
+    try:
+        with pytest.raises(RuntimeError, match="thread to be stopped"):
+            stream.reset_statistics(clear_buffers=True)
+    finally:
+        stream.stop()
+
+
+def test_preview_clear_buffers_after_stop_removes_pending_and_jpeg() -> None:
+    stream = LatestFrameStream(max_fps=20)
+    stream.start()
+    stream.submit_frame(np.full((40, 60, 3), 90, np.uint8))
+    deadline = time.monotonic() + 1
+    while stream.encoded_count < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    stream.stop()
+    stream.submit_frame(np.zeros((40, 60, 3), np.uint8))
+    assert stream.get_latest_jpeg(placeholder=False) is not None
+    assert stream.get_statistics()["preview_pending"] is True
+    stream.reset_statistics(clear_buffers=True)
+    statistics = stream.get_statistics()
+    assert stream.get_latest_jpeg(placeholder=False) is None
+    assert statistics["preview_pending"] is False
+    assert statistics["preview_jpeg_bytes"] == 0
+    assert statistics["preview_submitted_count"] == 0
+    assert statistics["preview_encoded_count"] == 0
+    assert statistics["preview_overwritten_count"] == 0
+
+
+def test_preview_warmup_counts_do_not_cross_clean_measurement_boundary() -> None:
+    stream = LatestFrameStream(max_fps=30)
+    frame = np.zeros((40, 60, 3), np.uint8)
+    stream.start()
+    stream.submit_frame(frame)
+    deadline = time.monotonic() + 1
+    while stream.encoded_count < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    stream.stop()
+    assert stream.encoded_count >= 1
+    stream.reset_statistics(clear_buffers=True)
+    stream.start()
+    stream.submit_frame(frame)
+    deadline = time.monotonic() + 1
+    while stream.encoded_count < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    stream.stop()
+    statistics = stream.get_statistics()
+    assert statistics["preview_submitted_count"] == 1
+    assert statistics["preview_encoded_count"] == 1
+
+
 def test_runtime_save_is_atomic_and_creates_backup(tmp_path) -> None:
     store = RuntimeConfigStore(touch_config(tmp_path))
     store.save_camera_override({"brightness": 10})
     store.save_camera_override({"brightness": 20})
     assert store.load_camera_override() == {"brightness": 20}
     assert list(store.config.backup_directory.glob("camera_override-*.yaml"))
+
+
+def test_ui_state_never_persists_competition_output_as_enabled(tmp_path) -> None:
+    store = RuntimeConfigStore(touch_config(tmp_path))
+    store.save_ui_state(True)
+    state = store.load_ui_state()
+    assert state["competition_mode"] is False
+    assert "detector" not in state
 
 
 def test_atomic_save_failure_preserves_previous_file(tmp_path, monkeypatch) -> None:

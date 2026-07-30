@@ -93,13 +93,13 @@ class RuntimeConfigStore:
             result[name] = value
         return result
 
-    def save_ui_state(self, competition_mode: bool, detector: str) -> None:
+    def save_ui_state(self, competition_mode: bool) -> None:
         self._backup(self.config.ui_state_file)
         self._atomic_write(
             self.config.ui_state_file,
             {
-                "competition_mode": bool(competition_mode),
-                "detector": str(detector),
+                # 比赛输出属于每次进程启动时的安全开关，不跨重启恢复。
+                "competition_mode": False,
                 "saved_wall_time": time.time(),
             },
         )

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB_ROOT = ROOT / "touch_ui_web"
+WEB_ROOT = ROOT / "web_debug" / "static"
 CONTROLS = {
     "brightness": {
         "supported": True,
@@ -124,8 +124,10 @@ class Handler(BaseHTTPRequestHandler):
                         "runtime_running": True,
                         "camera_online": True,
                         "serial_online": True,
-                        "vmc_tx_count": 3,
-                        "detector": "digit",
+                        "competition_mode": False,
+                        "vision_output_enabled": False,
+                        "position_tx_count": 3,
+                        "detector": "steel_ball_yolo_ncnn",
                         "state": "LOCKED",
                         "fps": 30,
                         "commands": COMMANDS,

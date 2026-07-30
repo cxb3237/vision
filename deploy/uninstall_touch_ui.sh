@@ -20,6 +20,6 @@ fi
 systemctl disable --now vision-touch.service 2>/dev/null || true
 rm -f /etc/systemd/system/vision-touch.service
 user_home="$(getent passwd "$USER_NAME" | cut -d: -f6)"
-rm -f "$user_home/.config/autostart/vision-touch-kiosk.desktop"
+rm -f -- "$user_home/.config/autostart/vision-touch-kiosk.desktop"
 systemctl daemon-reload
-echo "vision-touch服务和kiosk自启动已移除；项目与runtime现场配置未删除。"
+echo "vision-touch服务已移除，并清理旧版浏览器自启动残留；项目与runtime现场配置未删除。"
