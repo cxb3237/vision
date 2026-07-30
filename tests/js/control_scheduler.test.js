@@ -11,7 +11,7 @@ const {
   formatControlValue,
   quantizeControlValue,
   translateChoiceLabel,
-} = require("../../touch_ui_web/control_scheduler.js");
+} = require("../../web_debug/static/control_scheduler.js");
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 

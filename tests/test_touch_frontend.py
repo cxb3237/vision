@@ -7,18 +7,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_web_is_steel_ball_only_and_never_uses_browser_serial() -> None:
-    html = (ROOT / "touch_ui_web/index.html").read_text(encoding="utf-8")
-    javascript = (ROOT / "touch_ui_web/app.js").read_text(encoding="utf-8")
+    html = (ROOT / "web_debug/static/index.html").read_text(encoding="utf-8")
+    javascript = (ROOT / "web_debug/static/app.js").read_text(encoding="utf-8")
     server = (ROOT / "touch_ui/server.py").read_text(encoding="utf-8")
     combined = html + javascript
     assert "steelBallStatus" in html
     assert "ballPixelPosition" in html
-    assert "mcuStatus" in html and "lastSentPosition" in html
+    assert "mcuFields" in html and "lastSentPosition" in html
+    assert 'id="mcuStatus"' not in html
     assert "navigator.serial" not in combined
     assert "/api/detector" not in server
-HTML = (ROOT / "touch_ui_web/index.html").read_text(encoding="utf-8")
-CSS = (ROOT / "touch_ui_web/style.css").read_text(encoding="utf-8")
-JS = (ROOT / "touch_ui_web/app.js").read_text(encoding="utf-8")
+HTML = (ROOT / "web_debug/static/index.html").read_text(encoding="utf-8")
+CSS = (ROOT / "web_debug/static/style.css").read_text(encoding="utf-8")
+JS = (ROOT / "web_debug/static/app.js").read_text(encoding="utf-8")
 
 
 def test_page_is_fixed_viewport_with_non_overlapping_side_dock() -> None:
@@ -117,7 +118,8 @@ def test_maintenance_requires_long_press_and_danger_confirmation() -> None:
     assert 'maintenanceButton").addEventListener("pointerdown"' in JS
     assert "confirmDanger(" in JS
     assert 'request("/api/runtime/stop"' in JS
-    assert 'request("/api/kiosk/exit"' in JS
+    assert 'id="exitKiosk"' not in HTML
+    assert "/api/kiosk/exit" not in JS
 
 
 def test_portrait_layout_keeps_preview_above_dock() -> None:
@@ -138,6 +140,9 @@ def test_frontend_displays_calibration_error_and_real_uart_rates() -> None:
     assert "ball_position_calibration_error" in JS
     assert "position_tx_hz" in JS
     assert "invalid_tx_hz" in JS
+    assert '["S", "F", "EN", "X", "V", "E", "RQ", "AP", "PW", "AGE", "ST", "AC", "RJ"]' in JS
+    assert 'request("/debug/events")' in JS
+    assert 'id="eventLog"' in HTML
 
 
 def test_performance_panel_keeps_ncnn_and_end_to_end_latency_distinct() -> None:

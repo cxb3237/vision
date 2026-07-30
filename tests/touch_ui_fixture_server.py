@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB_ROOT = ROOT / "touch_ui_web"
+WEB_ROOT = ROOT / "web_debug" / "static"
 CONTROLS = {
     "brightness": {
         "supported": True,

@@ -46,6 +46,11 @@ class VisionResult:
     processing_delay_ms: int = 0
     image_width: int = 0
     image_height: int = 0
+    ball_position_mm: float | None = None
+    marker_a_x: int | None = None
+    marker_a_y: int | None = None
+    marker_b_x: int | None = None
+    marker_b_y: int | None = None
 
     def clear_target(self, state: TargetState = TargetState.NONE) -> None:
         self.found = False
@@ -62,6 +67,7 @@ class VisionResult:
         self.area_px = 0.0
         self.distance_mm = 0xFFFF
         self.confidence = 0
+        self.ball_position_mm = None
 
 
 @dataclass(slots=True)

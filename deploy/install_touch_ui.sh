@@ -52,39 +52,6 @@ for module in serial cv2 yaml; do
   fi
 done
 
-touch_settings="$({
-  cd "$PROJECT_DIR"
-  "$PROJECT_DIR/.venv/bin/python" - "$PROJECT_DIR" <<'PY'
-from pathlib import Path
-import sys
-
-from touch_ui.models import load_touch_ui_config
-
-project = Path(sys.argv[1])
-config = load_touch_ui_config(
-    project / "config/touch_ui.yaml",
-    project_root=project,
-    create_runtime=False,
-)
-if config.host not in {"localhost", "127.0.0.1", "::1"}:
-    raise SystemExit("kiosk配置只允许回环地址")
-print(config.host)
-print(config.port)
-PY
-})" || exit $?
-mapfile -t touch_values <<< "$touch_settings"
-if [[ "${#touch_values[@]}" -ne 2 ]]; then
-  echo "无法解析config/touch_ui.yaml中的host和port" >&2
-  exit 8
-fi
-touch_host="${touch_values[0]}"
-touch_port="${touch_values[1]}"
-if [[ "$touch_host" == "::1" ]]; then
-  touch_url="http://[::1]:${touch_port}"
-else
-  touch_url="http://${touch_host}:${touch_port}"
-fi
-
 if [[ ! -e /dev/ttyAMA0 ]]; then
   echo "提示：当前未发现/dev/ttyAMA0；服务仍会安装并由串口重连机制等待设备。" >&2
 fi
@@ -92,24 +59,17 @@ fi
 escape_sed() { printf '%s' "$1" | sed 's/[&|]/\\&/g'; }
 escaped_user="$(escape_sed "$USER_NAME")"
 escaped_project="$(escape_sed "$PROJECT_DIR")"
-escaped_touch_url="$(escape_sed "$touch_url")"
 sed -e "s|@USER@|$escaped_user|g" -e "s|@PROJECT_DIR@|$escaped_project|g" \
   "$PROJECT_DIR/deploy/vision-touch.service.template" \
   > /etc/systemd/system/vision-touch.service
 
 user_home="$(getent passwd "$USER_NAME" | cut -d: -f6)"
-autostart_dir="$user_home/.config/autostart"
-install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" "$autostart_dir"
-sed -e "s|@PROJECT_DIR@|$escaped_project|g" \
-  -e "s|@TOUCH_URL@|$escaped_touch_url|g" \
-  "$PROJECT_DIR/deploy/vision-touch-kiosk.desktop.template" \
-  > "$autostart_dir/vision-touch-kiosk.desktop"
-chown "$USER_NAME:$USER_NAME" "$autostart_dir/vision-touch-kiosk.desktop"
-chmod +x "$PROJECT_DIR/deploy/start_kiosk.sh"
+# 升级时主动删除旧版本本机浏览器自启动残留。
+rm -f -- "$user_home/.config/autostart/vision-touch-kiosk.desktop"
 usermod -aG video,dialout "$USER_NAME"
 systemctl daemon-reload
 systemctl enable vision-touch.service
 if [[ "$START_NOW" -eq 1 ]]; then
   systemctl restart vision-touch.service
 fi
-echo "安装完成。组权限需重新登录后生效；桌面kiosk需要为该用户启用图形桌面自动登录。"
+echo "视觉主服务安装完成。组权限需重新登录后生效；本机浏览器自启动已移除。"

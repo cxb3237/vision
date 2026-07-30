@@ -1,0 +1,17 @@
+[Unit]
+Description=CXB Raspberry Pi Wi-Fi Hotspot
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@PROJECT_DIR@/deploy/hotspot/install_hotspot.sh
+ExecStartPost=@PROJECT_DIR@/deploy/hotspot/hotspot_healthcheck.sh
+ExecStop=/usr/bin/nmcli connection down cxb-hotspot
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target
+

@@ -12,11 +12,13 @@ CameraService (latest frame)
   -> BallUartClient (latest-only)
   -> MSPM0
 
-Touch UI <- 状态快照 / 最新 JPEG <- VisionRuntime
-Touch UI -> Python API -> 运行时命令队列
+VisionRuntime -> 127.0.0.1:8765（原有状态、画面与控制 API）
+camera-debug-web.service -> 127.0.0.1:8081（静态页面与白名单代理）
+Nginx 192.168.50.1:8080 -> 平板调试网站
+Nginx 192.168.50.1:80   -> 比赛图传、录像、回放与下载网站
 ```
 
-网页不会使用 Web Serial，也不会直接打开串口。摄像头、NCNN、网页和 UART 均由同一个 Python 进程协调；摄像头始终只有一个 `CameraService` 实例。
+网页不会使用 Web Serial，也不会直接打开串口。摄像头、NCNN 和 UART 仍只由原有视觉主进程协调，摄像头始终只有一个 `CameraService` 实例。独立调试站只代理原有本机接口，不打开摄像头、不加载第二份 NCNN 模型，也不接触 UART。热点、调试站和 Nginx 都是新增的独立服务；它们失败不会级联停止视觉主服务。
 
 ## 接线与串口参数
 
@@ -142,18 +144,69 @@ python3 -m tools.camera_profile_check --device 0 --camera-config config/camera.y
 
 网页具有比赛模式和停止程序等控制接口，因此服务端只接受 `127.0.0.1`、`localhost` 或 `::1`，不会监听 `0.0.0.0` 或局域网/公网地址。HTTP 请求体上限为 64 KiB。
 
-## systemd 与 kiosk
+## 平板热点与固定网站
+
+Raspberry Pi 使用 NetworkManager 创建固定热点：
+
+- 热点名称：`cxb`
+- 热点密码：`123@chenzi`
+- 无线接口：`wlan0`
+- 树莓派地址：`192.168.50.1/24`
+- 比赛网站：[http://192.168.50.1/](http://192.168.50.1/)
+- 调试网站：[http://192.168.50.1:8080/](http://192.168.50.1:8080/)
+
+TCP 80 的比赛网站提供实时摄像头画面、录像状态与计时、文件名、写入/丢弃帧数、实际帧率、剩余空间，以及录像开始、停止、列表、浏览器 Range 回放和下载。比赛页不提供摄像头参数、UART、位置下发、模型或系统控制。录像复用视觉主进程唯一的 `CameraService`，按 `FramePacket.capture_timestamp` 重采样到容器帧率；输入偏慢时复制最近帧、偏快时丢弃多余帧，从而使视频时长接近真实经过时间。
+
+调试站使用顶部关键状态、可滚动详细信息和固定底部操作栏；在 1024×600、1280×800 和 1920×1080 横屏下，“摄像头参数”和“启用/停止位置下发”始终可见。主状态只有在已请求输出、UART 在线、MCU READY 且 `position_tx_hz > 0` 时才显示“位置下发运行中”。未标定时前端禁用“启用位置下发”，后端也会拒绝该操作。
+
+在树莓派工程根目录安装：
+
+```bash
+sudo apt install network-manager nginx
+sudo bash deploy/install_tablet_web.sh --user "$USER" --project-dir "$PWD"
+```
+
+安装采用两个阶段：脚本先以 `--no-activate` 创建或更新热点配置，再完成 systemd、调试网站和 Nginx 的安装、校验与启用；只有所有前置步骤通过后，最后才重启 `cxb-hotspot.service` 激活热点。通过 `wlan0` SSH 执行时，最后激活热点会切断当前 SSH，请优先使用有线网络或本地终端。前置步骤失败时不会切换 `wlan0`；若最终热点激活失败，已校验的服务配置会保留，可在本地终端或有线网络中执行 `sudo systemctl restart cxb-hotspot.service` 重试。
+
+比赛站和调试站的 MJPEG 画面都会自动重连。初次打开时后端尚未就绪、Wi-Fi 短暂中断、Nginx 或视觉服务重启后，无需刷新整页；页面以 1、2、4、5 秒退避重试，并分别显示后端、摄像头和视频流状态。
+
+安装脚本会幂等更新唯一的 `cxb-hotspot` 连接，删除旧的 `~/.config/autostart/vision-touch-kiosk.desktop`，安装 `cxb-hotspot.service`、`camera-debug-web.service` 和专用 Nginx 路由，并在启动前执行 `nginx -t`。本工程专用的 `nginx.service.d/camera-tablet-hotspot.conf` 声明 `After=`/`Wants=cxb-hotspot.service`，避免 Nginx 在 `192.168.50.1` 尚未配置时过早绑定失败；卸载脚本只删除这一 drop-in，不修改系统原始 `nginx.service`。
+
+`config/competition_ui.yaml` 默认 `enabled: true`。原有 `vision-touch.service` 的 ExecStart 完全不变：`app.py --touch-ui` 会在同一进程内自动启动仅监听 `127.0.0.1:8000` 的比赛后端，并复用唯一摄像头。比赛后端、录像目录或 Nginx 故障只记录错误，不会停止视觉识别、UART或位置控制主链路。
+
+树莓派不再开机自动打开 Chromium，也不再需要桌面自动登录、显示器或本地 kiosk。平板连接 Wi-Fi `cxb`，输入密码 `123@chenzi`，然后用 Chrome/Edge 打开上述固定地址即可。
+
+查看状态和日志：
+
+```bash
+systemctl status vision-touch.service
+journalctl -u vision-touch.service -f
+systemctl status cxb-hotspot.service camera-debug-web.service nginx.service
+journalctl -u cxb-hotspot.service -u camera-debug-web.service -u nginx.service -f
+```
+
+手动重启新增服务：
+
+```bash
+sudo systemctl restart cxb-hotspot.service
+sudo systemctl restart camera-debug-web.service
+sudo systemctl restart nginx.service
+```
+
+只卸载本次新增的热点、调试站和 Nginx 路由：
+
+```bash
+sudo bash deploy/uninstall_tablet_web.sh --user "$USER" --project-dir "$PWD"
+```
+
+卸载不会删除视觉主服务、工程、模型、录像、其他 Wi-Fi 连接或其他 Nginx 网站。
+
+原有视觉主服务若尚未安装，仍使用原安装命令：
 
 ```bash
 sudo bash deploy/install_touch_ui.sh --user "$USER" --project-dir "$PWD" --start
 systemctl status vision-touch.service
 journalctl -u vision-touch.service -f
-```
-
-浏览器 kiosk 使用项目专用 profile，只访问本机 URL。退出 kiosk 不会停止视觉后端；需要重新打开时运行：
-
-```bash
-deploy/start_kiosk.sh &
 ```
 
 ## 常见故障
@@ -165,17 +218,42 @@ deploy/start_kiosk.sh &
 - PING 有回复但不发位置：确认网页已启用位置下发、MCU READY、标定状态有效，且检测到了钢球。
 - 没识别到球：检查模型是否加载、画面曝光、摄像头视野以及网页中的识别错误。
 - 反向运动：切换 `servo_side`，不要交换毫米端点来掩盖安装方向。
+- 平板找不到 `cxb`：检查 `systemctl status NetworkManager cxb-hotspot.service` 和 `journalctl -u cxb-hotspot.service`，确认 `wlan0` 存在且未被其他热点或客户端连接占用。
+- 热点密码错误：忘记旧网络后重新连接，密码严格为 `123@chenzi`。
+- 能连热点但网页打不开：先 `ping 192.168.50.1`，再检查 `systemctl status nginx camera-debug-web`；客户端应关闭移动网络代理/VPN 后重试。
+- `192.168.50.1` 不通：运行 `ip address show wlan0`，应看到 `192.168.50.1/24`；再运行 `deploy/hotspot/hotspot_healthcheck.sh`。
+- TCP 80 不通：检查 `vision-touch.service` 中的比赛后端日志、`curl http://127.0.0.1:8000/healthz` 和 Nginx；8000 是内部端口，不应从平板直接访问。
+- TCP 80 正常但 8080 不通：检查 `camera-debug-web.service` 以及 `curl http://127.0.0.1:8081/debug/healthz`。8081 和 8765 都是内部端口，不应从平板直接访问。
+- 调试页显示“视觉主服务未连接”：检查 `vision-touch.service`；代理会继续运行，视觉主服务恢复后页面会自动恢复轮询。
+- 摄像头画面不刷新：先确认视觉主服务在线，再检查 `/api/preview.mjpg` 和摄像头日志；不要启动第二个采集程序。
+- NetworkManager 未运行：执行 `sudo systemctl enable --now NetworkManager` 后重新启动 `cxb-hotspot.service`。
 
 ## 测试
 
 ```bash
 python -m compileall -q .
-python -m pytest -q
+python -m pytest -q -rs
 python -m tools.touch_ui_selftest
-node --check touch_ui_web/app.js
-node --check touch_ui_web/control_scheduler.js
+node --check web_debug/static/app.js
+node --check web_debug/static/control_scheduler.js
+node --check web_competition/app.js
+node --test tests/js/*.test.js
+bash -n deploy/install_tablet_web.sh
+bash -n deploy/uninstall_tablet_web.sh
+bash -n deploy/hotspot/install_hotspot.sh
+bash -n deploy/hotspot/uninstall_hotspot.sh
+bash -n deploy/hotspot/hotspot_healthcheck.sh
 ```
 
-Windows 可导入全部生产模块并运行无硬件测试；V4L2、串口、systemd 和 kiosk 测试均使用 mock 或静态检查。真实摄像头、真实 UART 电气连接、MCU 复位恢复、实际位置发送频率和树莓派 kiosk 必须在 Raspberry Pi 5 上现场验证。
+上述 Node 命令是基础 JavaScript 测试。没有 Playwright 时，浏览器布局用例会明确显示 `SKIP`，其余用例仍正常执行并以退出码 0 完成。若要在开发机上运行可选的真实 Chromium 布局测试，可安装开发依赖（它不是树莓派正式运行依赖）：
+
+```bash
+npm install --save-dev playwright
+npx playwright install chromium
+```
+
+真实平板还需做录像兼容性验收：录制 10 秒，等待页面确认完成并自动刷新列表；核对文件名、分辨率、FPS、实际 codec、大小和完整状态；随后在浏览器中直接播放、拖动进度条、下载文件，并核对下载视频的真实时长。若实际 codec 不是 H.264/avc1，页面会给出兼容性警告，但仍保留 mp4v 回退以保证树莓派可录像。
+
+Windows 可导入全部生产模块并运行无硬件测试；V4L2、串口、NetworkManager、systemd 和 Nginx 相关自动测试使用 mock 或静态检查。真实热点创建与重启恢复、DHCP、多型号平板连接、Nginx 绑定、实时 MJPEG、真实摄像头、UART 电气连接、MCU 复位恢复及实际位置发送频率必须在 Raspberry Pi 5 上现场验证。
 
 旧多检测器、旧二进制通信、训练数据和历史录制/标定工具已从部署工程移除；模型权重位于 `models/steel_ball/best_ncnn_model/`，本次清理不修改模型参数或二进制权重。

@@ -5,6 +5,7 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 from core.models import FramePacket, TargetState, VisionResult
 from core.vision_runtime import VisionRuntime
@@ -166,6 +167,16 @@ def test_valid_calibration_allows_position() -> None:
     runtime = make_runtime(True, calibrated=True)
     run_one_frame(runtime)
     assert runtime.ball_uart.positions == [0]
+
+
+def test_enter_competition_is_rejected_when_position_is_uncalibrated() -> None:
+    runtime = make_runtime(False, calibrated=False)
+    with pytest.raises(RuntimeError, match="未标定"):
+        runtime._set_competition(True)
+    status = runtime.get_status_snapshot()
+    assert status["competition_mode"] is False
+    assert status["vision_output_enabled"] is False
+    assert runtime.ball_uart.starts == 0
 
 
 def test_equal_calibration_endpoints_are_reported_without_crashing() -> None:

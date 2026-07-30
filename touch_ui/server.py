@@ -14,7 +14,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from touch_ui.api import TouchAPI, api_error
-from touch_ui.kiosk import KioskExitError, exit_kiosk
 from touch_ui.models import CommandType, TouchUIConfig, validate_loopback_host
 
 
@@ -40,7 +39,9 @@ class TouchUIServer:
         self.runtime = runtime
         self.config = config
         self.api = TouchAPI(runtime)
-        self.web_root = (web_root or Path(__file__).resolve().parents[1] / "touch_ui_web").resolve()
+        self.web_root = (
+            web_root or Path(__file__).resolve().parents[1] / "web_debug" / "static"
+        ).resolve()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_request_lock = threading.Lock()
@@ -224,19 +225,7 @@ class TouchUIServer:
                     "/api/competition/exit": CommandType.EXIT_COMPETITION,
                 }
                 try:
-                    if path == "/api/kiosk/exit":
-                        body = self._body()
-                        if body:
-                            self._json(*api_error(400, "INVALID_BODY", "退出kiosk不接受PID或命令参数"))
-                            return
-                        try:
-                            pid = exit_kiosk(owner.config.runtime_directory / "kiosk.pid")
-                        except KioskExitError as exc:
-                            LOG.warning("浏览器PID验证失败: %s", exc)
-                            self._json(*api_error(409, "KIOSK_EXIT_REJECTED", str(exc)))
-                        else:
-                            self._json(200, {"ok": True, "status": "EXITING", "pid": pid})
-                    elif path == "/api/runtime/stop":
+                    if path == "/api/runtime/stop":
                         body = self._body()
                         if body:
                             self._json(*api_error(400, "INVALID_BODY", "停止视觉程序不接受命令参数"))

@@ -189,3 +189,21 @@ def load_steel_ball_ncnn_config(path: str | Path = "config/steel_ball_ncnn.yaml"
     if not isinstance(config.debug_tensor_shapes, bool):
         raise ConfigError("steel_ball_ncnn.debug_tensor_shapes 必须为布尔值")
     return config
+
+
+def load_pipe_mapping_config(path: str | Path = "config/pipe_mapping.yaml") -> dict[str, Any]:
+    data = _read(path)
+    for name in ("enabled", "marker_a", "marker_b"):
+        if name not in data:
+            raise ConfigError(f"pipe_mapping 缺少必要字段: {name}")
+    for marker_name in ("marker_a", "marker_b"):
+        marker = data[marker_name]
+        if not isinstance(marker, dict):
+            raise ConfigError(f"pipe_mapping.{marker_name} 必须是映射")
+        for name in ("name", "hsv_lower", "hsv_upper", "position_mm"):
+            if name not in marker:
+                raise ConfigError(f"pipe_mapping.{marker_name} 缺少必要字段: {name}")
+        for name in ("hsv_lower", "hsv_upper"):
+            if not isinstance(marker[name], list) or len(marker[name]) != 3:
+                raise ConfigError(f"pipe_mapping.{marker_name}.{name} 必须包含 3 个值")
+    return data

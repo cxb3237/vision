@@ -1,0 +1,13 @@
+enabled: true
+
+marker_a:
+  name: right_blue
+  hsv_lower: [95, 80, 60]
+  hsv_upper: [135, 255, 255]
+  position_mm: 125.0
+
+marker_b:
+  name: left_red
+  hsv_lower: [0, 100, 80]
+  hsv_upper: [10, 255, 255]
+  position_mm: -125.0

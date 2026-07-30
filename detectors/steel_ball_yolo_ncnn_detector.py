@@ -345,6 +345,45 @@ class SteelBallYoloNcnnDetector(BaseDetector):
                 2,
                 cv2.LINE_AA,
             )
+        marker_a = (
+            (result.marker_a_x, result.marker_a_y)
+            if result.marker_a_x is not None and result.marker_a_y is not None
+            else None
+        )
+        marker_b = (
+            (result.marker_b_x, result.marker_b_y)
+            if result.marker_b_x is not None and result.marker_b_y is not None
+            else None
+        )
+        if marker_a is not None:
+            cv2.circle(output, marker_a, 6, (255, 0, 0), -1)
+            cv2.putText(
+                output, "A", (marker_a[0] + 8, marker_a[1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 0), 2, cv2.LINE_AA,
+            )
+        if marker_b is not None:
+            cv2.circle(output, marker_b, 6, (0, 255, 0), -1)
+            cv2.putText(
+                output, "B", (marker_b[0] + 8, marker_b[1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA,
+            )
+        if marker_a is not None and marker_b is not None:
+            cv2.line(output, marker_a, marker_b, (255, 255, 0), 2, cv2.LINE_AA)
+        position_text = (
+            f"X = {result.ball_position_mm:+.1f} mm"
+            if result.ball_position_mm is not None
+            else "X = --"
+        )
+        cv2.putText(
+            output,
+            position_text,
+            (12, max(24, output.shape[0] - 18)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
         status = self.get_runtime_status()
         state_name = TargetState(int(result.target_state)).name
         lines = (

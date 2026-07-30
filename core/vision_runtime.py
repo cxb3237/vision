@@ -10,9 +10,12 @@ import threading
 import time
 from types import MappingProxyType
 from typing import Any, Callable
+from competition_ui.media_service import CompetitionMediaService
+from competition_ui.models import CompetitionUIConfig
 
 from core.models import CameraConfig, VisionResult
 from core.performance_metrics import RollingRate, RollingSamples
+from detectors.pipe_marker_detector import compute_ball_position_mm
 from drivers.v4l2_controls import apply_v4l2_controls, query_v4l2_control_info, read_v4l2_controls
 from touch_ui.api import ALLOWED_CONTROLS
 from touch_ui.frame_stream import LatestFrameStream
@@ -71,8 +74,11 @@ class VisionRuntime:
         ball_uart: Any,
         tracker: Any,
         display_handler: Callable[[Any, Any, VisionResult], tuple[bool, Any]],
+        pipe_marker_detector: Any = None,
+        pipe_mapping_config: dict[str, Any] | None = None,
         camera_config: CameraConfig | None = None,
         touch_config: TouchUIConfig | None = None,
+        competition_config: CompetitionUIConfig | None = None,
         initial_competition_mode: bool = False,
         command_queue_size: int = 64,
     ) -> None:
@@ -83,8 +89,11 @@ class VisionRuntime:
         self.ball_uart = ball_uart
         self.tracker = tracker
         self.display_handler = display_handler
+        self.pipe_marker_detector = pipe_marker_detector
+        self.pipe_mapping_config = pipe_mapping_config
         self.camera_config = camera_config
         self.touch_config = touch_config
+        self.competition_config = competition_config
         self.command_queue = RuntimeCommandQueue(command_queue_size)
         self.persistence = RuntimeConfigStore(touch_config) if touch_config else None
         self.frame_stream = LatestFrameStream(
@@ -92,12 +101,18 @@ class VisionRuntime:
             jpeg_quality=touch_config.jpeg_quality if touch_config else 80,
             max_width=touch_config.preview_max_width if touch_config else 960,
         )
+        self.competition_media_service = (
+            CompetitionMediaService(camera_service, competition_config)
+            if competition_config
+            else None
+        )
         self._stop_event = threading.Event()
         self._lifecycle_lock = threading.Lock()
         self._started = False
         self._camera_started = False
         self._uart_started = False
         self._preview_started = False
+        self._competition_media_started = False
         self._last_frame_id: int | None = None
         self._vision_rate = RollingRate(window_seconds=2.0, max_events=512)
         self._capture_to_result = RollingSamples(max_samples=120)
@@ -120,6 +135,9 @@ class VisionRuntime:
                 "center_y": -1,
                 "ball_x_px": None,
                 "ball_x_mm": None,
+                "ball_position_mm": None,
+                "marker_a": None,
+                "marker_b": None,
                 **calibration,
                 "camera_online": False,
                 "latest_frame_age_s": None,
@@ -158,6 +176,17 @@ class VisionRuntime:
 
     def _ball_calibration_status(self, image_width: int | None = None) -> dict[str, Any]:
         profile = self.mission.get("ball_uart", {})
+        if self.pipe_mapping_config is not None:
+            enabled = bool(self.pipe_mapping_config.get("enabled", False))
+            return {
+                "ball_position_calibrated": enabled,
+                "ball_position_calibration_error": (
+                    "" if enabled else "动态水管坐标映射已禁用"
+                ),
+                "left_endpoint_px": profile.get("left_endpoint_px"),
+                "right_endpoint_px": profile.get("right_endpoint_px"),
+                "servo_side": profile.get("servo_side"),
+            }
         configured = bool(profile.get("calibrated", False))
         left = profile.get("left_endpoint_px")
         right = profile.get("right_endpoint_px")
@@ -216,6 +245,14 @@ class VisionRuntime:
                 if self.touch_config:
                     self.frame_stream.start()
                     self._preview_started = True
+                if self.competition_media_service:
+                    try:
+                        self.competition_media_service.start()
+                        self._competition_media_started = True
+                    except Exception:
+                        LOG.exception(
+                            "比赛媒体服务启动失败；视觉识别、UART和调试网页继续运行"
+                        )
                 if self.state_store.snapshot()["competition_mode"]:
                     self.ball_uart.discard_pending_ball_position()
                     self.ball_uart.send_start()
@@ -235,6 +272,12 @@ class VisionRuntime:
             self._stop_resources()
 
     def _stop_resources(self) -> None:
+        if self._competition_media_started:
+            try:
+                self.competition_media_service.stop()
+            except Exception:
+                LOG.exception("比赛媒体服务停止时发生错误")
+            self._competition_media_started = False
         if self._preview_started:
             self.frame_stream.stop()
             self._preview_started = False
@@ -328,6 +371,10 @@ class VisionRuntime:
 
     def _set_competition(self, enabled: bool) -> None:
         if enabled:
+            calibration = self.state_store.snapshot()
+            if not calibration.get("ball_position_calibrated", False):
+                reason = calibration.get("ball_position_calibration_error") or "位置尚未标定"
+                raise RuntimeError(f"未标定，禁止启用位置下发：{reason}")
             self.ball_uart.discard_pending_ball_position()
             self.state_store.update(competition_mode=True, vision_output_enabled=True)
             self.ball_uart.send_start()
@@ -404,7 +451,8 @@ class VisionRuntime:
             latest_frame_age_s=float(latest_frame_age) if age_is_valid else None,
             camera_fps=float(camera.get("actual_fps", 0.0)),
             uart_port_open=bool(uart.get("connected")),
-            serial_online=bool(uart.get("connected")) and bool(uart.get("mcu_ready")),
+            # UART transport availability and MCU readiness are distinct states.
+            serial_online=bool(uart.get("connected")),
             mcu_ready=bool(uart.get("mcu_ready")),
             uart_state=uart.get("uart_state", "串口未打开"),
             mcu_status=uart.get("mcu_status", {}),
@@ -436,6 +484,21 @@ class VisionRuntime:
                     self.state_store.update(vision_skipped_camera_frames=current + skipped)
                 self._last_frame_id = frame.frame_id
                 result = self.tracker.update(self.detector.process(frame))
+                marker_a = marker_b = None
+                if self.pipe_marker_detector is not None:
+                    marker_a, marker_b = self.pipe_marker_detector.detect(frame.image)
+                result.marker_a_x = marker_a[0] if marker_a is not None else None
+                result.marker_a_y = marker_a[1] if marker_a is not None else None
+                result.marker_b_x = marker_b[0] if marker_b is not None else None
+                result.marker_b_y = marker_b[1] if marker_b is not None else None
+                if result.found and marker_a is not None and marker_b is not None:
+                    result.ball_position_mm = compute_ball_position_mm(
+                        marker_a,
+                        marker_b,
+                        (result.center_x, result.center_y),
+                        float(self.pipe_mapping_config["marker_a"]["position_mm"]),
+                        float(self.pipe_mapping_config["marker_b"]["position_mm"]),
+                    )
                 now = time.monotonic()
                 latency = max(0.0, (now - frame.capture_timestamp) * 1000.0)
                 self._capture_to_result.add(latency)
@@ -444,7 +507,9 @@ class VisionRuntime:
                 image_width = int(frame.image.shape[1]) if frame.image.ndim >= 2 else 0
                 calibration = self._ball_calibration_status(image_width)
                 x_mm = None
-                if x_px is not None and calibration["ball_position_calibrated"]:
+                if self.pipe_mapping_config is not None:
+                    x_mm = result.ball_position_mm
+                elif x_px is not None and calibration["ball_position_calibrated"]:
                     try:
                         x_mm = self.ball_uart.pixel_x_to_mm(x_px)
                     except (TypeError, ValueError, OverflowError) as exc:
@@ -455,7 +520,7 @@ class VisionRuntime:
                     if x_mm is None:
                         self.ball_uart.send_invalid()
                     else:
-                        self.ball_uart.publish_ball_position(x_mm)
+                        self.ball_uart.publish_ball_position(int(round(x_mm)))
                 else:
                     self.ball_uart.discard_pending_ball_position()
                 summary = self._capture_to_result.summary()
@@ -466,7 +531,18 @@ class VisionRuntime:
                     center_x=x_px if x_px is not None else -1,
                     center_y=int(result.center_y) if result.found else -1,
                     ball_x_px=x_px,
-                    ball_x_mm=x_mm,
+                    ball_x_mm=round(x_mm, 1) if x_mm is not None else None,
+                    ball_position_mm=round(x_mm, 1) if x_mm is not None else None,
+                    marker_a=(
+                        {"x": marker_a[0], "y": marker_a[1]}
+                        if marker_a is not None
+                        else None
+                    ),
+                    marker_b=(
+                        {"x": marker_b[0], "y": marker_b[1]}
+                        if marker_b is not None
+                        else None
+                    ),
                     vision_fps=self._vision_rate.rate(now),
                     fps=self._vision_rate.rate(now),
                     capture_to_result_ms=latency,
@@ -479,7 +555,7 @@ class VisionRuntime:
                 if self._preview_started or (bool(getattr(self.args, "display", False)) and not bool(getattr(self.args, "headless", False))):
                     annotated = self.detector.draw_debug(frame.image, result)
                 if self._preview_started and annotated is not None:
-                    self.frame_stream.submit(annotated, frame.frame_id, now)
+                    self.frame_stream.submit_frame(annotated)
                 if bool(getattr(self.args, "display", False)) and not bool(getattr(self.args, "headless", False)):
                     keep_running, _ = self.display_handler(frame.image, self.detector, result)
                     if not keep_running:

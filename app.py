@@ -12,9 +12,18 @@ import threading
 from typing import Any
 
 import cv2
+from competition_ui.models import CompetitionUIConfig,CompetitionUIConfigError,load_competition_ui_config
+from competition_ui.server import CompetitionUIServer
 
-from core.config_loader import ConfigError, load_camera_config, load_mission_config, load_steel_ball_ncnn_config
+from core.config_loader import (
+    ConfigError,
+    load_camera_config,
+    load_mission_config,
+    load_pipe_mapping_config,
+    load_steel_ball_ncnn_config,
+)
 from core.vision_runtime import VisionRuntime
+from detectors.pipe_marker_detector import PipeMarkerDetector
 from detectors.steel_ball_yolo_ncnn_detector import SteelBallYoloNcnnDetector
 from detectors.target_tracker import TargetTracker
 from drivers.ball_uart_client import BallUartClient
@@ -36,12 +45,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mission-config", default="config/mission.yaml")
     parser.add_argument("--camera-config", default="config/camera.yaml")
     parser.add_argument("--steel-ball-ncnn-config", default="config/steel_ball_ncnn.yaml")
+    parser.add_argument("--pipe-mapping-config", default="config/pipe_mapping.yaml")
     parser.add_argument("--touch-config", default="config/touch_ui.yaml")
     parser.add_argument("--mode", choices=("track",), default="track", help=argparse.SUPPRESS)
     parser.add_argument("--display", action="store_true", help="显示 OpenCV 调试窗口")
     parser.add_argument("--touch-ui", action="store_true", help="启动本地触摸网页")
     parser.add_argument("--touch-host", default=None, help="覆盖网页监听地址")
     parser.add_argument("--touch-port", type=int, default=None, help="覆盖网页监听端口")
+    parser.add_argument("--competition-ui", action="store_true")
+    parser.add_argument("--competition-config", default="config/competition_ui.yaml")
+    parser.add_argument("--competition-host", default=None)
+    parser.add_argument("--competition-port", type=int, default=None)
     parser.add_argument("--headless", action="store_true", help="禁止 OpenCV 窗口")
     parser.add_argument("--serial-port", help="覆盖 UART 设备并启用 UART")
     parser.add_argument("--baudrate", type=int, help="覆盖 UART 波特率")
@@ -60,6 +74,10 @@ def validate_ui_arguments(args: argparse.Namespace) -> None:
         raise ConfigError("--touch-port 必须在 1..65535 范围内")
     if args.touch_host is not None and not args.touch_host.strip():
         raise ConfigError("--touch-host 不能为空")
+    if args.competition_port is not None and not 1 <= args.competition_port <= 65535:
+        raise ConfigError("--competition-port 必须在 1..65535 范围内")
+    if args.competition_host is not None and not args.competition_host.strip():
+        raise ConfigError("--competition-host 不能为空")
 
 
 def resolve_touch_ui_config(args: argparse.Namespace, *, project_root: str | Path | None = None) -> TouchUIConfig:
@@ -85,6 +103,20 @@ def configure_touch_logging(log_path: str | Path = "logs/touch_ui.log") -> None:
     handler = RotatingFileHandler(resolved, maxBytes=1_048_576, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.addHandler(handler)
+
+def resolve_competition_ui_config(
+    args: argparse.Namespace,
+    *,
+    project_root: str | Path | None = None,
+) -> CompetitionUIConfig:
+    config = load_competition_ui_config(args.competition_config, project_root=project_root)
+    host = config.host if args.competition_host is None else args.competition_host.strip()
+    port = config.port if args.competition_port is None else args.competition_port
+    if host != "127.0.0.1":
+        raise ConfigError("比赛后端只允许监听 127.0.0.1")
+    if not 1 <= port <= 65535:
+        raise ConfigError("比赛网页 port 必须在 1..65535 范围内")
+    return replace(config, host=host, port=port)
 
 
 def resolve_ball_uart_settings(args: argparse.Namespace, mission: dict[str, Any]) -> dict[str, Any]:
@@ -136,8 +168,11 @@ def run_application(
     camera_service: Any,
     ball_uart: Any,
     *,
+    pipe_marker_detector: Any = None,
+    pipe_mapping_config: dict[str, Any] | None = None,
     camera_config: Any = None,
     touch_config: TouchUIConfig | None = None,
+    competition_config: CompetitionUIConfig | None = None,
     initial_competition_mode: bool = False,
 ) -> int:
     tracker = TargetTracker(
@@ -154,11 +189,20 @@ def run_application(
         ball_uart=ball_uart,
         tracker=tracker,
         display_handler=_handle_display,
+        pipe_marker_detector=pipe_marker_detector,
+        pipe_mapping_config=pipe_mapping_config,
         camera_config=camera_config,
         touch_config=touch_config,
+        competition_config=competition_config,
         initial_competition_mode=initial_competition_mode,
     )
     web = TouchUIServer(runtime, touch_config) if touch_config else None
+    competition_web = None
+    if competition_config is not None:
+        try:
+            competition_web = CompetitionUIServer(runtime, competition_config)
+        except Exception:
+            LOG.exception("比赛网页初始化失败；视觉识别、UART和调试网页继续运行")
     old_signals: dict[int, Any] = {}
     if threading.current_thread() is threading.main_thread():
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -166,9 +210,17 @@ def run_application(
     try:
         runtime.start()
         if web:
-            web.start()
+            try:web.start()
+            except OSError:LOG.exception("调试网页启动失败；其他服务继续")
+        if competition_web:
+            try:
+                competition_web.start()
+            except Exception:
+                LOG.exception("比赛网页启动失败；视觉识别、UART和调试网页继续运行")
         return runtime.run_forever()
     finally:
+        if competition_web:
+            competition_web.stop()
         if web:
             web.stop()
         if getattr(runtime, "_started", False):
@@ -186,11 +238,25 @@ def main(argv: list[str] | None = None) -> int:
         mission = load_mission_config(args.mission_config)
         camera_config = load_camera_config(args.camera_config)
         touch_config = None
+        competition_config = None
         if args.touch_ui:
             args.headless = True
             touch_config = resolve_touch_ui_config(args)
             configure_touch_logging()
+        if args.competition_ui:
+            args.headless = True
+            competition_config = resolve_competition_ui_config(args)
+        elif args.touch_ui:
+            try:
+                automatic_competition_config = resolve_competition_ui_config(args)
+                if automatic_competition_config.enabled:
+                    competition_config = automatic_competition_config
+                    LOG.info("触摸模式已按配置自动启用比赛网站后端")
+            except (CompetitionUIConfigError, ConfigError, OSError):
+                LOG.exception("比赛网站配置加载失败；视觉识别、UART和调试网页继续运行")
         detector = create_detector(args.steel_ball_ncnn_config)
+        pipe_mapping_config = load_pipe_mapping_config(args.pipe_mapping_config)
+        pipe_marker_detector = PipeMarkerDetector(pipe_mapping_config)
         camera = CameraService(camera_config)
         uart_settings = resolve_ball_uart_settings(args, mission)
         uart = BallUartClient(uart_settings.pop("port"), uart_settings.pop("baudrate"), **uart_settings)
@@ -200,11 +266,14 @@ def main(argv: list[str] | None = None) -> int:
             detector,
             camera,
             uart,
+            pipe_marker_detector=pipe_marker_detector,
+            pipe_mapping_config=pipe_mapping_config,
             camera_config=camera_config,
             touch_config=touch_config,
+            competition_config=competition_config,
             initial_competition_mode=bool(args.competition_mode),
         )
-    except (ConfigError, TouchUIConfigError, ValueError, OSError) as exc:
+    except (ConfigError,TouchUIConfigError,CompetitionUIConfigError,ValueError,OSError) as exc:
         LOG.error("启动失败: %s", exc)
         return 2
     except Exception:

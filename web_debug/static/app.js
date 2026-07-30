@@ -16,6 +16,11 @@ let maintenanceOpenedByHold = false;
 let confirmResolver = null;
 let cameraControlsRenderCount = 0;
 let competitionModeEnabled = false;
+let lastCalibrationValid = false;
+let debugBackendOnline = false;
+let debugCameraOnline = false;
+let debugStreamOnline = false;
+let debugStreamState = "connecting";
 const controlFailures = new Map();
 const controlScheduler = new ControlUpdateScheduler({
   debounceMs: parameterDebounce,
@@ -77,7 +82,49 @@ function setTag(id, label, active, warning = false) {
   element.classList.toggle("warning", warning);
 }
 
+function updateDebugStreamNotice() {
+  const notice = $("debugStreamNotice");
+  let title = "";
+  let detail = "";
+  if (!debugBackendOnline) {
+    title = "视觉后端未连接";
+    detail = "状态和视频流会自动重试。";
+  } else if (!debugCameraOnline) {
+    title = "摄像头离线";
+    detail = "视觉后端在线，正在等待摄像头恢复。";
+  } else if (!debugStreamOnline) {
+    title = debugStreamState === "connecting" ? "调试视频流正在连接" : "调试视频流重连中";
+    detail = "无需刷新页面，恢复后会自动显示。";
+  }
+  notice.hidden = !title;
+  text("debugStreamNoticeTitle", title);
+  text("debugStreamNoticeDetail", detail);
+}
+
+function positionDeliveryState(status) {
+  const requested = !!status.vision_output_enabled;
+  const serialOnline = !!status.serial_online;
+  const ready = !!status.mcu_ready;
+  const rate = Number(status.position_tx_hz || 0);
+  const uartState = String(status.uart_state || "").toUpperCase();
+  if (!requested) {
+    if (uartState.includes("STOP_REQUESTED") || uartState.includes("STOPPING")) return "正在停止";
+    if (uartState.includes("STOPPED")) return "已停止";
+    return "未请求位置下发";
+  }
+  if (!serialOnline) {
+    if (/ERROR|FAULT|DISCONNECT|FAILED/.test(uartState)) return "UART故障";
+    return "已请求位置下发，等待UART";
+  }
+  if (!ready) return "已请求位置下发，等待MCU READY";
+  if (rate > 0) return "位置下发运行中";
+  if (status.ball_x_mm === null || status.ball_x_mm === undefined) return "已启用但当前没有有效位置";
+  return "位置流中断";
+}
+
 function renderStatus(status) {
+  debugBackendOnline = true;
+  debugCameraOnline = !!status.camera_online;
   competitionModeEnabled = !!status.competition_mode;
   pollInterval = status.ui?.status_poll_interval_ms || pollInterval;
   parameterDebounce = status.ui?.parameter_debounce_ms ?? parameterDebounce;
@@ -89,7 +136,9 @@ function renderStatus(status) {
   const captureToResultP95 = Number(status.capture_to_result_p95_ms ?? 0);
   text("fps", visionFps.toFixed(1));
   text("cameraFps", cameraFps.toFixed(1));
+  text("cameraFpsDetail", cameraFps.toFixed(1));
   text("previewFps", previewFps.toFixed(1));
+  text("visionFpsDetail", visionFps.toFixed(1));
   text("pipelineFps", `${cameraFps.toFixed(1)} / ${visionFps.toFixed(1)} / ${previewFps.toFixed(1)} FPS`);
   text("pipelineLatency", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
   text(
@@ -101,6 +150,7 @@ function renderStatus(status) {
   const invalidTxHz = Number(status.invalid_tx_hz ?? 0);
   text("txCount", `${positionTxCount} · POS ${positionTxHz.toFixed(1)} Hz · INVALID ${invalidTxHz.toFixed(1)} Hz`);
   const calibrated = !!status.ball_position_calibrated;
+  lastCalibrationValid = calibrated;
   const calibrationError = status.ball_position_calibration_error || "";
   const xMillimetres = status.ball_x_mm;
   const xPixels = status.ball_x_px;
@@ -112,11 +162,49 @@ function renderStatus(status) {
         ? "-- mm"
         : `${Number(xMillimetres) > 0 ? "+" : ""}${Number(xMillimetres)} mm`),
   );
-  text("ballPixelPosition", `像素 X：${xPixels === null || xPixels === undefined ? "—" : xPixels}`);
+  text("ballPixelPosition", xPixels === null || xPixels === undefined ? "—" : xPixels);
   text("mappingState", calibrated ? "已标定" : (calibrationError || "未标定"));
+  text("calibrationError", calibrationError || "--");
+  text("leftEndpoint", status.left_endpoint_px ?? "--");
+  text("rightEndpoint", status.right_endpoint_px ?? "--");
+  text("servoSide", status.servo_side ?? "--");
+  const latestFrameAge = status.latest_frame_age_s;
+  text("latestFrameAge", latestFrameAge === null || latestFrameAge === undefined ? "--" : `${Number(latestFrameAge).toFixed(3)} s`);
+  const detected = xPixels !== null && xPixels !== undefined;
+  text("ballDetected", detected ? "已识别" : "未识别");
+  text("ballConfidence", `${(Number(status.confidence || 0) / 10).toFixed(1)}%`);
   text("uartState", status.uart_state || "串口未打开");
   text("uartPortState", status.uart_port_open ? "已打开" : "未打开");
-  text("mcuStatus", JSON.stringify(status.mcu_status || {}));
+  text("mcuReadyState", status.mcu_ready ? "是" : "否");
+  text("positionTxRate", `${positionTxHz.toFixed(1)} Hz`);
+  text("invalidTxRate", `${invalidTxHz.toFixed(1)} Hz`);
+  const mcuFields = status.mcu_status || {};
+  const mcuContainer = $("mcuFields");
+  mcuContainer.replaceChildren();
+  const mcuDescriptions = {
+    S: ["控制状态", ""], F: ["故障码", ""], EN: ["闭环使能", ""],
+    X: ["位置", " mm"], V: ["速度", " mm/s"], E: ["误差", " mm"],
+    RQ: ["请求倾角", ""], AP: ["实际倾角", ""], PW: ["脉宽", " μs"],
+    AGE: ["数据帧龄", " ms"], ST: ["稳定状态", ""],
+    AC: ["接受帧数", ""], RJ: ["拒绝帧数", ""],
+  };
+  ["S", "F", "EN", "X", "V", "E", "RQ", "AP", "PW", "AGE", "ST", "AC", "RJ"].forEach((name) => {
+    const wrapper = document.createElement("div");
+    const label = document.createElement("dt");
+    const value = document.createElement("dd");
+    label.textContent = `${name} ${mcuDescriptions[name][0]}`;
+    value.textContent = mcuFields[name] === null || mcuFields[name] === undefined
+      ? "--"
+      : `${mcuFields[name]}${mcuDescriptions[name][1]}`;
+    wrapper.append(label, value);
+    mcuContainer.append(wrapper);
+  });
+  text("keyS", mcuFields.S ?? "--");
+  text("keyF", mcuFields.F ?? "--");
+  text("keyEN", mcuFields.EN ?? "--");
+  text("keyAGE", mcuFields.AGE ?? "--");
+  text("keyAC", mcuFields.AC ?? "--");
+  text("keyRJ", mcuFields.RJ ?? "--");
   text("lastSentPosition", status.last_sent_position_mm === null || status.last_sent_position_mm === undefined ? "--" : `${status.last_sent_position_mm} mm`);
   text("lastError", status.last_uart_error || status.detector_error || status.last_error || "无错误");
   const steelBallPanel = $("steelBallStatus");
@@ -130,27 +218,41 @@ function renderStatus(status) {
     );
     text("steelBallE2E", `${captureToResult.toFixed(1)} / ${captureToResultP95.toFixed(1)} ms`);
   }
-  setTag("runningBadge", status.runtime_running ? "RUNNING" : "STOPPED", !!status.runtime_running);
-  setTag("cameraBadge", status.camera_online ? "CAM ONLINE" : "CAM OFFLINE", !!status.camera_online);
-  setTag("serialBadge", status.serial_online ? "UART ONLINE" : "UART OFFLINE", !!status.serial_online);
-  setTag("mcuBadge", status.mcu_ready ? "MCU READY" : "MCU WAIT", !!status.mcu_ready, !status.mcu_ready);
-  const txState = !status.serial_online ? "OFFLINE" : (!status.mcu_ready ? "WAIT READY" : (status.vision_output_enabled ? "ACTIVE" : "PAUSED"));
-  setTag(
-    "positionTxBadge",
-    `位置 TX ${txState}`,
-    txState === "ACTIVE",
-    txState !== "ACTIVE" && txState !== "PAUSED",
-  );
+  setTag("runningBadge", status.runtime_running ? "服务运行中" : "服务已停止", !!status.runtime_running);
+  setTag("cameraBadge", status.camera_online ? "摄像头在线" : "摄像头离线", !!status.camera_online);
+  setTag("serialBadge", status.serial_online ? "串口在线" : "串口离线", !!status.serial_online);
+  setTag("mcuBadge", status.mcu_ready ? "MCU已就绪" : "MCU未就绪", !!status.mcu_ready, !status.mcu_ready);
+  const deliveryState = positionDeliveryState(status);
+  text("positionTxBadge", deliveryState);
+  $("positionTxBadge").classList.toggle("running", deliveryState === "位置下发运行中");
+  $("positionTxBadge").classList.toggle("fault", deliveryState === "UART故障");
   const dirty = !!status.runtime_modified || controlScheduler.hasPending();
-  setTag("dirtyBadge", dirty ? "DIRTY" : "CLEAN", !dirty, dirty);
+  setTag("dirtyBadge", dirty ? "配置已修改" : "配置未修改", !dirty, dirty);
   const visionOutputEnabled = !!status.vision_output_enabled;
   setTag(
     "competitionBadge",
-    visionOutputEnabled ? "比赛识别有效 · 正在向小车发送" : "调试识别 · 不下发控制",
+    visionOutputEnabled ? "比赛识别有效" : "调试识别",
     true,
     visionOutputEnabled,
   );
   text("enterCompetition", competitionModeEnabled ? "停止位置下发" : "启用位置下发");
+  $("enterCompetition").disabled = !competitionModeEnabled && !calibrated;
+  $("enterCompetition").title = (!competitionModeEnabled && !calibrated)
+    ? (calibrationError || "未标定，禁止启用位置下发")
+    : "";
+  updateDebugStreamNotice();
+}
+
+function renderBackendUnavailable(message) {
+  debugBackendOnline = false;
+  debugCameraOnline = false;
+  setTag("runningBadge", "后端不可用", false, true);
+  setTag("cameraBadge", "摄像头未知", false, true);
+  setTag("serialBadge", "串口未知", false, true);
+  setTag("mcuBadge", "MCU状态未知", false, true);
+  $("enterCompetition").disabled = true;
+  text("lastError", `视觉主服务未连接：${message}`);
+  updateDebugStreamNotice();
 }
 
 async function pollStatus() {
@@ -159,9 +261,27 @@ async function pollStatus() {
     const data = await request("/api/status");
     renderStatus(data.status);
   } catch (error) {
-    text("lastError", error.message);
+    renderBackendUnavailable(error.message);
   } finally {
     if (statusPolling) setTimeout(pollStatus, pollInterval);
+  }
+}
+
+async function pollEvents() {
+  try {
+    const data = await request("/debug/events");
+    const container = $("eventLog");
+    container.replaceChildren();
+    const events = Array.isArray(data.events) ? data.events.slice(-20).reverse() : [];
+    (events.length ? events : [{timestamp: "--", level: "INFO", message: "暂无事件"}]).forEach((item) => {
+      const row = document.createElement("li");
+      row.textContent = `${item.timestamp} ${item.level} ${item.message}`;
+      container.append(row);
+    });
+  } catch (_error) {
+    // The visual backend may serve this same static page internally without the debug proxy.
+  } finally {
+    setTimeout(pollEvents, 2000);
   }
 }
 
@@ -704,10 +824,18 @@ $("restoreBaseline").addEventListener("click", async () => {
   await controlScheduler.waitForIdle();
   await runCommand("/api/runtime/restore-baseline", "恢复基准参数", {refreshCamera: true});
 });
-$("enterCompetition").addEventListener("click", () => runCommand(
-  competitionModeEnabled ? "/api/competition/exit" : "/api/competition/enter",
-  competitionModeEnabled ? "停止位置下发" : "启用位置下发",
-));
+$("enterCompetition").addEventListener("click", async () => {
+  if (!competitionModeEnabled && !lastCalibrationValid) {
+    toast("未标定，禁止启用位置下发");
+    return;
+  }
+  const action = competitionModeEnabled ? "停止位置下发" : "启用位置下发";
+  if (!await confirmDanger(action, `确认${action}？`)) return;
+  await runCommand(
+    competitionModeEnabled ? "/api/competition/exit" : "/api/competition/enter",
+    action,
+  );
+});
 
 $("maintenanceButton").addEventListener("pointerdown", beginMaintenanceHold);
 $("maintenanceButton").addEventListener("pointerup", endMaintenanceHold);
@@ -718,13 +846,6 @@ $("maintenanceExitCompetition").addEventListener("click", async () => {
   if (!await confirmDanger("退出比赛模式", "确认恢复现场调试功能？")) return;
   $("maintenanceMenu").hidden = true;
   await runCommand("/api/competition/exit", "退出比赛模式");
-});
-$("exitKiosk").addEventListener("click", async () => {
-  if (!await confirmDanger("退出全屏界面", "确认关闭当前kiosk浏览器？视觉程序将继续运行。")) return;
-  try {
-    await request("/api/kiosk/exit", {method: "POST", body: "{}"});
-    toast("正在退出全屏界面");
-  } catch (error) { toast(`退出失败：${error.message}`); }
 });
 $("stopRuntime").addEventListener("click", async () => {
   if (!await confirmDanger("停止视觉程序", "将安全停止摄像头、串口和Web服务，确认继续？")) return;
@@ -745,6 +866,26 @@ window.__visionTouchTest = {
   controlScheduler,
   waitForCommand,
   getCameraControlsRenderCount: () => cameraControlsRenderCount,
+  positionDeliveryState,
+  updateDebugStreamNotice,
 };
 
+const debugStreamController = new MjpegReconnectController($("preview"), {
+  url: "/api/preview.mjpg",
+  onStateChange: (state, online) => {
+    debugStreamState = state;
+    debugStreamOnline = online;
+    updateDebugStreamNotice();
+  },
+});
+window.__visionTouchTest.debugStreamController = debugStreamController;
+function stopDebugPageWorkers() {
+  statusPolling = false;
+  debugStreamController.stop();
+}
+window.addEventListener("pagehide", stopDebugPageWorkers, {once: true});
+window.addEventListener("beforeunload", stopDebugPageWorkers, {once: true});
+
+debugStreamController.start();
 pollStatus();
+pollEvents();
