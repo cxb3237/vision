@@ -1,0 +1,29 @@
+python -m compileall -q .
+RESULT: PASS
+
+python -m pytest -q -rs
+RESULT: PASS
+267 passed, 2 skipped in 10.50s
+Skipped: tests/test_touch_javascript.py environment Node detection and opt-in Playwright geometry test.
+
+node --test tests/js/*.test.js
+RESULT: PASS (bundled Node.js runtime)
+tests 26; pass 19; fail 0; skipped 7
+Skipped: Playwright browser cases because Playwright is not installed.
+
+bash -n deploy/install_touch_ui.sh
+RESULT: PASS
+
+bash -n deploy/install_tablet_web.sh
+RESULT: PASS
+
+git diff --check
+RESULT: PASS
+
+Final targeted UART/runtime suite
+RESULT: PASS
+67 passed in 0.57s
+
+Hardware test
+RESULT: NOT RUN
+Reason: current Windows environment has no Raspberry Pi, /dev/ttyAMA0, DAPLink, or MSPM0 connection.

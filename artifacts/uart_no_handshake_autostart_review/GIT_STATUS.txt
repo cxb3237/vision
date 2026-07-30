@@ -1,0 +1,16 @@
+﻿ M README.md
+ M app.py
+ M config/mission.yaml
+ M config/touch_ui.yaml
+ M core/config_loader.py
+ M core/vision_runtime.py
+ M deploy/install_tablet_web.sh
+ M deploy/install_touch_ui.sh
+ M drivers/ball_uart_client.py
+ M tests/test_ball_uart_client.py
+ M tests/test_competition_config.py
+ M tests/test_config_loader.py
+ M tests/test_touch_deploy.py
+?? artifacts/uart_no_handshake_autostart_review.zip
+?? artifacts/uart_no_handshake_autostart_review/
+?? tests/test_uart_no_handshake_autostart.py

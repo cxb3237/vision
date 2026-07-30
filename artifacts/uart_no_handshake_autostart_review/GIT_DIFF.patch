@@ -1,0 +1,937 @@
+﻿diff --git a/README.md b/README.md
+index 1e15e72..5d0a82b 100644
+--- a/README.md
++++ b/README.md
+@@ -40,20 +40,30 @@ BALL START
+ BALL STOP
+ BALL POS <整数 -125..125>
+ BALL INVALID
+-BALL PING
+-BALL STATUS
+ ```
+ 
+-每行实际以 `\r\n` 结束。位置结果为 latest-only：视觉线程提交不阻塞，未发送的旧位置会被新位置覆盖，不会积压历史帧。未进入比赛模式、MCU 尚未 READY 或位置尚未有效标定时不发送 `BALL POS`。比赛模式下识别失败或未标定时发送 `BALL INVALID`。
++每行实际以 `\r\n` 结束。位置结果为 latest-only：视觉线程提交不阻塞，未发送的旧位置会被新位置覆盖，不会积压历史帧。自动位置输出启用后，有效映射发送 `BALL POS`，识别失败、映射无效或端点丢失发送 `BALL INVALID`。
+ 
+-以下任一精确回复可建立 READY：
++## 无握手自动位置发送模式
+ 
+-```text
+-READY BALL UART2 9600
+-OK C=BALL_PING
++生产视觉进程采用无握手模式：树莓派不主动发送 `BALL PING`，不等待 `READY BALL UART2 9600` 或 `OK C=BALL_PING`。`/dev/ttyAMA0` 成功打开后立即发送一次 `BALL START`，随后按有效视觉帧发送 `BALL POS <整数毫米>` 或 `BALL INVALID`；串口重连后再次发送一次 `BALL START`，程序关闭时尽最大努力发送一次 `BALL STOP`。MCU 返回的 READY、OK、ERR 和 STATUS 仍会被读取并作为诊断记录，但不会控制 START、POS 或 INVALID 的发送许可。
++
++自动输出只在进程启动时根据 [config/touch_ui.yaml](config/touch_ui.yaml) 的 `startup.competition_mode: true` 应用一次。网页主动停止位置下发后会发送 STOP 并保持停止，不会被启动配置立即重新打开；进程下次重启时才重新应用启动配置。
++
++TTL UART 在无握手模式下无法判断 MCU 是否真的接线。即使 MCU 未连接，树莓派仍可能成功把数据写入 UART 硬件，因此现场必须用逻辑分析仪、DAPLink 或 MCU 实测确认。`vision-touch.service` 负责开机自启动，不允许其他程序或服务同时占用 `/dev/ttyAMA0`；运行 `tools.test_ball_uart` 前必须先停止主视觉服务。
++
++部署和检查：
++
++```bash
++sudo systemctl daemon-reload
++sudo systemctl enable vision-touch.service
++sudo systemctl restart vision-touch.service
++systemctl is-enabled vision-touch.service
++systemctl status vision-touch.service
++journalctl -u vision-touch.service -f
+ ```
+ 
+-普通文本、`OK P`、`OK I` 或其他 `OK C=...` 不会误触发 READY。链路超过 `link_timeout_s` 没有有效回复后会回到握手状态，丢弃旧位置并周期发送 PING；比赛输出意图会保留，重新 READY 后先发送 START，再恢复位置。
++独立硬件工具仍保留手动 `ping` 子命令，专供停掉主视觉服务后的协议诊断；它不属于生产自动发送路径。
+ 
+ ## 像素到毫米标定
+ 
+@@ -86,13 +96,13 @@ sudo usermod -aG dialout "$USER"
+ 
+ 加入 `dialout` 后必须重新登录，新的串口组权限才会生效。
+ 
+-调试模式（检测和网页照常运行，但不下发位置）：
++按默认配置启动（检测、网页和位置下发自动运行）：
+ 
+ ```bash
+ python3 app.py --touch-ui --headless --serial-port /dev/ttyAMA0
+ ```
+ 
+-启动后立即进入比赛输出：
++命令行也可以显式要求立即进入位置输出：
+ 
+ ```bash
+ python3 app.py --touch-ui --headless --serial-port /dev/ttyAMA0 --competition-mode
+@@ -104,7 +114,7 @@ python3 app.py --touch-ui --headless --serial-port /dev/ttyAMA0 --competition-mo
+ python3 app.py --display --no-serial
+ ```
+ 
+-`--serial-debug` 会记录 UART 打开/关闭、PING、READY 来源、START/STOP、错误、重连和限频后的位置发送。`send_rate_hz: 50` 只是最大 UART 发送频率，不会重发旧位置；实际位置更新频率不会高于有效视觉结果频率。网页状态分别显示 `camera_fps`、`vision_fps`、`position_tx_hz` 和 `invalid_tx_hz`，不要把 50 Hz 上限当成当前实测值。
++`--serial-debug` 会记录 UART 打开/关闭、START/STOP、诊断回复、错误、重连，以及每秒最多一次的位置或 INVALID 发送日志。`send_rate_hz: 50` 只是最大 UART 发送频率，不会重发旧位置；实际位置更新频率不会高于有效视觉结果频率。网页状态分别显示 `camera_fps`、`vision_fps`、`position_tx_hz` 和 `invalid_tx_hz`，不要把 50 Hz 上限当成当前实测值。
+ 
+ ## 独立 UART 硬件检查
+ 
+@@ -213,9 +223,9 @@ journalctl -u vision-touch.service -f
+ 
+ - 串口被占用：停止旧服务，并用 `lsof /dev/ttyAMA0` 检查占用。
+ - 没有权限：执行 `sudo usermod -aG dialout "$USER"`，然后重新登录。
+-- 无 READY：检查 9600/8N1、TX/RX 交叉、共地和 MCU UART2。
+-- MCU READY 在树莓派启动前错过：客户端会发 `BALL PING`，`OK C=BALL_PING` 可恢复握手。
+-- PING 有回复但不发位置：确认网页已启用位置下发、MCU READY、标定状态有效，且检测到了钢球。
++- MCU 完全不回复：无握手模式仍会继续写 START 和位置流；用 DAPLink 或逻辑分析仪检查树莓派 TX，并核对 9600/8N1、TX/RX 交叉、共地和 MCU UART2。
++- 没有位置包：确认自动位置输出状态、动态端点和钢球是否同时有效；任一目标缺失时应看到 `BALL INVALID`。
++- 需要手动协议诊断：先执行 `sudo systemctl stop vision-touch.service`，确认 `/dev/ttyAMA0` 已释放，再运行 `tools.test_ball_uart`；诊断结束后重启主服务。
+ - 没识别到球：检查模型是否加载、画面曝光、摄像头视野以及网页中的识别错误。
+ - 反向运动：切换 `servo_side`，不要交换毫米端点来掩盖安装方向。
+ - 平板找不到 `cxb`：检查 `systemctl status NetworkManager cxb-hotspot.service` 和 `journalctl -u cxb-hotspot.service`，确认 `wlan0` 存在且未被其他热点或客户端连接占用。
+diff --git a/app.py b/app.py
+index e12a1a9..40b39be 100644
+--- a/app.py
++++ b/app.py
+@@ -135,12 +135,8 @@ def resolve_ball_uart_settings(args: argparse.Namespace, mission: dict[str, Any]
+         "timeout_s": float(profile["timeout_s"]),
+         "write_timeout_s": float(profile["write_timeout_s"]),
+         "reconnect_interval_s": float(profile["reconnect_interval_s"]),
+-        "ping_interval_s": float(profile["ping_interval_s"]),
+-        "status_interval_s": float(profile["status_interval_s"]),
+-        "link_timeout_s": float(profile["link_timeout_s"]),
+         "debug_position_interval_s": float(profile["debug_position_interval_s"]),
+         "statistics_interval_s": float(profile["statistics_interval_s"]),
+-        "control_reconcile_interval_s": float(profile["control_reconcile_interval_s"]),
+         "debug": bool(args.serial_debug),
+         "line_ending": profile["line_ending"],
+         "wait_ready": bool(profile["wait_ready"]),
+@@ -271,7 +267,10 @@ def main(argv: list[str] | None = None) -> int:
+             camera_config=camera_config,
+             touch_config=touch_config,
+             competition_config=competition_config,
+-            initial_competition_mode=bool(args.competition_mode),
++            initial_competition_mode=bool(
++                args.competition_mode
++                or getattr(touch_config, "startup_competition_mode", False)
++            ),
+         )
+     except (ConfigError,TouchUIConfigError,CompetitionUIConfigError,ValueError,OSError) as exc:
+         LOG.error("启动失败: %s", exc)
+diff --git a/config/mission.yaml b/config/mission.yaml
+index df916a7..7dcdb35 100644
+--- a/config/mission.yaml
++++ b/config/mission.yaml
+@@ -11,13 +11,10 @@ ball_uart:
+   # Maximum UART send rate; actual position updates are limited by valid vision frames.
+   send_rate_hz: 50
+   line_ending: "\r\n"
+-  wait_ready: true
+-  ping_interval_s: 1.0
+-  status_interval_s: 1.0
+-  link_timeout_s: 3.0
+-  debug_position_interval_s: 0.2
++  # No-handshake mode: an open UART is immediately available for START/POS/INVALID.
++  wait_ready: false
++  debug_position_interval_s: 1.0
+   statistics_interval_s: 1.0
+-  control_reconcile_interval_s: 0.5
+   calibrated: false
+   left_endpoint_px: 72
+   right_endpoint_px: 568
+diff --git a/config/touch_ui.yaml b/config/touch_ui.yaml
+index 58cb8b1..e95f49f 100644
+--- a/config/touch_ui.yaml
++++ b/config/touch_ui.yaml
+@@ -9,7 +9,7 @@ preview:
+ 
+ startup:
+   restore_runtime_overrides: true
+-  competition_mode: false
++  competition_mode: true
+ 
+ ui:
+   status_poll_interval_ms: 250
+diff --git a/core/config_loader.py b/core/config_loader.py
+index d83b52d..6c16fbd 100644
+--- a/core/config_loader.py
++++ b/core/config_loader.py
+@@ -104,13 +104,9 @@ def load_mission_config(path: str | Path = "config/mission.yaml", overrides: dic
+         "reconnect_interval_s": 1.0,
+         "send_rate_hz": 50.0,
+         "line_ending": "\r\n",
+-        "wait_ready": True,
+-        "ping_interval_s": 1.0,
+-        "status_interval_s": 1.0,
+-        "link_timeout_s": 3.0,
+-        "debug_position_interval_s": 0.2,
++        "wait_ready": False,
++        "debug_position_interval_s": 1.0,
+         "statistics_interval_s": 1.0,
+-        "control_reconcile_interval_s": 0.5,
+         "calibrated": False,
+         "left_endpoint_px": 72,
+         "right_endpoint_px": 568,
+@@ -122,13 +118,13 @@ def load_mission_config(path: str | Path = "config/mission.yaml", overrides: dic
+     for name in ("enabled", "wait_ready", "calibrated"):
+         if not isinstance(profile[name], bool):
+             raise ConfigError(f"mission.ball_uart.{name} 必须为布尔值")
++    if profile["wait_ready"]:
++        raise ConfigError("mission.ball_uart.wait_ready 必须为 false（无握手模式）")
+     if not isinstance(profile["port"], str) or not profile["port"].strip():
+         raise ConfigError("mission.ball_uart.port 不能为空")
+     for name in (
+         "baudrate", "timeout_s", "write_timeout_s", "reconnect_interval_s",
+-        "send_rate_hz", "ping_interval_s", "status_interval_s", "link_timeout_s",
+-        "debug_position_interval_s", "statistics_interval_s",
+-        "control_reconcile_interval_s",
++        "send_rate_hz", "debug_position_interval_s", "statistics_interval_s",
+     ):
+         value = profile[name]
+         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+diff --git a/core/vision_runtime.py b/core/vision_runtime.py
+index 7b42afc..6821fe9 100644
+--- a/core/vision_runtime.py
++++ b/core/vision_runtime.py
+@@ -240,6 +240,9 @@ class VisionRuntime:
+                 self.detector.initialize()
+                 self.camera_service.start()
+                 self._camera_started = True
++                if self.state_store.snapshot()["competition_mode"]:
++                    self.ball_uart.discard_pending_ball_position()
++                    self.ball_uart.send_start()
+                 self.ball_uart.start()
+                 self._uart_started = bool(self.ball_uart.enabled)
+                 if self.touch_config:
+@@ -253,9 +256,6 @@ class VisionRuntime:
+                         LOG.exception(
+                             "比赛媒体服务启动失败；视觉识别、UART和调试网页继续运行"
+                         )
+-                if self.state_store.snapshot()["competition_mode"]:
+-                    self.ball_uart.discard_pending_ball_position()
+-                    self.ball_uart.send_start()
+                 self._refresh_camera_controls()
+                 self._started = True
+                 self.state_store.update(runtime_running=True, **self._detector_status())
+diff --git a/deploy/install_tablet_web.sh b/deploy/install_tablet_web.sh
+index c9ac567..abc71e9 100644
+--- a/deploy/install_tablet_web.sh
++++ b/deploy/install_tablet_web.sh
+@@ -74,7 +74,7 @@ nginx_enabled="/etc/nginx/sites-enabled/camera-tablet.conf"
+ nginx_dropin_dir="/etc/systemd/system/nginx.service.d"
+ nginx_dropin="$nginx_dropin_dir/camera-tablet-hotspot.conf"
+ managed_paths=("$unit_hotspot" "$unit_debug" "$nginx_available" "$nginx_enabled" "$nginx_dropin")
+-managed_services=(cxb-hotspot.service camera-debug-web.service nginx.service)
++managed_services=(vision-touch.service cxb-hotspot.service camera-debug-web.service nginx.service)
+ declare -A service_was_enabled
+ declare -A service_was_active
+ 
+@@ -172,10 +172,11 @@ CURRENT_STEP="systemd daemon-reload"
+ systemctl daemon-reload
+ 
+ CURRENT_STEP="enable 开机服务"
++systemctl enable vision-touch.service
+ systemctl enable cxb-hotspot.service
+ systemctl enable camera-debug-web.service
+ systemctl enable nginx.service
+-for service in cxb-hotspot.service camera-debug-web.service nginx.service; do
++for service in vision-touch.service cxb-hotspot.service camera-debug-web.service nginx.service; do
+   systemctl is-enabled --quiet "$service"
+ done
+ 
+diff --git a/deploy/install_touch_ui.sh b/deploy/install_touch_ui.sh
+index 062bcbd..a3aff2c 100644
+--- a/deploy/install_touch_ui.sh
++++ b/deploy/install_touch_ui.sh
+@@ -69,6 +69,7 @@ rm -f -- "$user_home/.config/autostart/vision-touch-kiosk.desktop"
+ usermod -aG video,dialout "$USER_NAME"
+ systemctl daemon-reload
+ systemctl enable vision-touch.service
++systemctl is-enabled --quiet vision-touch.service
+ if [[ "$START_NOW" -eq 1 ]]; then
+   systemctl restart vision-touch.service
+ fi
+diff --git a/drivers/ball_uart_client.py b/drivers/ball_uart_client.py
+index 05e1500..bc114a2 100644
+--- a/drivers/ball_uart_client.py
++++ b/drivers/ball_uart_client.py
+@@ -23,8 +23,7 @@ STOP_COMMAND = b"BALL STOP\r\n"
+ 
+ class BallUartState(str, Enum):
+     CLOSED = "串口未打开"
+-    WAITING_READY = "等待 MCU READY"
+-    READY = "MCU 已就绪"
++    READY = "串口已连接（无握手）"
+     START_REQUESTED = "已请求闭环启动"
+     RUNNING = "闭环运行中"
+     STOPPED = "闭环已停止"
+@@ -96,15 +95,11 @@ class BallUartClient:
+         write_timeout_s: float = 0.05,
+         reconnect_interval_s: float = 1.0,
+         send_rate_hz: float = 50.0,
+-        ping_interval_s: float = 1.0,
+-        status_interval_s: float = 1.0,
+-        link_timeout_s: float = 3.0,
+-        debug_position_interval_s: float = 0.2,
++        debug_position_interval_s: float = 1.0,
+         statistics_interval_s: float = 1.0,
+-        control_reconcile_interval_s: float = 0.5,
+         debug: bool = False,
+         line_ending: str = "\r\n",
+-        wait_ready: bool = True,
++        wait_ready: bool = False,
+         left_endpoint_px: int = 72,
+         right_endpoint_px: int = 568,
+         servo_side: str = "right",
+@@ -112,23 +107,20 @@ class BallUartClient:
+     ) -> None:
+         if baudrate <= 0 or timeout_s <= 0 or write_timeout_s <= 0:
+             raise ValueError("UART baudrate and timeouts must be positive")
+-        if send_rate_hz <= 0 or reconnect_interval_s <= 0 or link_timeout_s <= 0:
++        if send_rate_hz <= 0 or reconnect_interval_s <= 0:
+             raise ValueError("UART rates and reconnect interval must be positive")
+-        if control_reconcile_interval_s <= 0:
+-            raise ValueError("control_reconcile_interval_s must be positive")
+         if line_ending != "\r\n":
+             raise ValueError("line_ending must be CRLF")
++        if wait_ready:
++            raise ValueError("wait_ready must be false in no-handshake mode")
+         self.port, self.baudrate, self.enabled = port, int(baudrate), bool(enabled)
+         self.timeout_s, self.write_timeout_s = float(timeout_s), float(write_timeout_s)
+         self.reconnect_interval_s = float(reconnect_interval_s)
+         self.send_rate_hz = float(send_rate_hz)
+-        self.ping_interval_s, self.status_interval_s = float(ping_interval_s), float(status_interval_s)
+-        self.link_timeout_s = float(link_timeout_s)
+         self.debug_position_interval_s = float(debug_position_interval_s)
+         self.statistics_interval_s = float(statistics_interval_s)
+-        self.control_reconcile_interval_s = float(control_reconcile_interval_s)
+         self.debug = bool(debug)
+-        self.wait_ready = bool(wait_ready)
++        self.wait_ready = False
+         self.line_ending = line_ending
+         self.left_endpoint_px, self.right_endpoint_px = left_endpoint_px, right_endpoint_px
+         self.servo_side = servo_side
+@@ -165,10 +157,7 @@ class BallUartClient:
+         self._decode_error_count = 0
+         self._line_overflow_count = 0
+         self._last_position_debug_at = 0.0
+-        self._last_control_reconcile_at = {
+-            START_COMMAND: float("-inf"),
+-            STOP_COMMAND: float("-inf"),
+-        }
++        self._last_invalid_debug_at = 0.0
+         self._position_tx_rate = RollingRate(window_seconds=2.0, max_events=256)
+         self._invalid_tx_rate = RollingRate(window_seconds=2.0, max_events=256)
+ 
+@@ -273,12 +262,6 @@ class BallUartClient:
+             self._control.appendleft(STOP_COMMAND)
+         return True
+ 
+-    def send_ping(self) -> bool:
+-        return self._queue_control(encode_command("PING"))
+-
+-    def request_status(self) -> bool:
+-        return self._queue_control(encode_command("STATUS"))
+-
+     def send_invalid(self) -> bool:
+         return self._publish_latest(None, encode_command("INVALID"))
+ 
+@@ -304,36 +287,42 @@ class BallUartClient:
+     def _next_outbound(self, now: float, next_position: float) -> tuple[bytes | None, float]:
+         with self._outbound_lock:
+             if self._control:
+-                for index, item in enumerate(self._control):
+-                    if self._ready or item in {encode_command("PING"), STOP_COMMAND}:
+-                        del self._control[index]
+-                        return item, next_position
+-            if self._ready and self._desired_running and self._latest_position is not None and now >= next_position:
++                return self._control.popleft(), next_position
++            if self._desired_running and self._latest_position is not None and now >= next_position:
+                 _position, data = self._latest_position
+                 self._latest_position = None
+                 return data, now + 1.0 / self.send_rate_hz
+         return None, next_position
+ 
+-    def _mark_ready(self, source: str) -> None:
+-        was_ready = self._ready
+-        self._ready = True
+-        self._last_valid_rx_at = time.monotonic()
+-        self._last_error = ""
+-        self._state = BallUartState.READY
+-        LOG.info("UART READY source=%s%s", source, " (link recovered)" if not was_ready else "")
+-        if source == "ping_ack":
+-            LOG.info("UART handshake recovered through BALL_PING acknowledgement")
++    def _prepare_open_connection(self) -> None:
++        """Drop stale output and queue at most one START for this connection."""
++
+         with self._outbound_lock:
++            self._latest_position = None
+             if self._desired_running:
++                self._control = deque(
++                    item
++                    for item in self._control
++                    if item not in {START_COMMAND, STOP_COMMAND}
++                )
++                self._control.appendleft(START_COMMAND)
+                 self._state = BallUartState.START_REQUESTED
++            else:
+                 self._control = deque(
+-                    item for item in self._control if item not in {START_COMMAND, STOP_COMMAND}
++                    item for item in self._control if item != START_COMMAND
+                 )
+-                if self.enabled:
+-                    self._control.appendleft(START_COMMAND)
++                self._state = BallUartState.READY
++
++    def _mark_ready(self, source: str) -> None:
++        """Record a diagnostic READY indication without changing send permission."""
++
++        self._ready = True
++        self._last_valid_rx_at = time.monotonic()
++        self._last_error = ""
++        LOG.info("UART RX diagnostic READY source=%s", source)
+ 
+     def _reconcile_control_ack(self, acknowledged_running: bool) -> bool:
+-        """Apply an ACK only when it matches the latest user intent."""
++        """Record a matching ACK; replies never enqueue or gate output."""
+ 
+         with self._outbound_lock:
+             desired_running = self._desired_running
+@@ -342,82 +331,11 @@ class BallUartClient:
+                     BallUartState.RUNNING if acknowledged_running else BallUartState.STOPPED
+                 )
+                 return True
+-            command = START_COMMAND if desired_running else STOP_COMMAND
+-            self._control = deque(
+-                item for item in self._control if item not in {START_COMMAND, STOP_COMMAND}
+-            )
+-            if self.enabled:
+-                self._control.appendleft(command)
+             self._state = (
+                 BallUartState.START_REQUESTED if desired_running else BallUartState.STOPPED
+             )
+             return False
+ 
+-    def _reconcile_enabled_state(self, enabled: int, now: float) -> bool:
+-        """Reconcile an MCU STATUS EN value with the latest user intent.
+-
+-        Returns True only when a corrective START or STOP is newly queued.
+-        User-initiated commands bypass this method and therefore are never
+-        rate-limited by ``control_reconcile_interval_s``.
+-        """
+-
+-        if enabled not in {0, 1}:
+-            return False
+-        with self._outbound_lock:
+-            desired_running = self._desired_running
+-            actual_running = enabled == 1
+-            if desired_running == actual_running:
+-                self._control = deque(
+-                    item
+-                    for item in self._control
+-                    if item not in {START_COMMAND, STOP_COMMAND}
+-                )
+-                self._state = (
+-                    BallUartState.RUNNING if actual_running else BallUartState.STOPPED
+-                )
+-                return False
+-
+-            command = START_COMMAND if desired_running else STOP_COMMAND
+-            command_already_queued = command in self._control
+-            self._control = deque(
+-                item
+-                for item in self._control
+-                if item not in {START_COMMAND, STOP_COMMAND}
+-            )
+-            if not desired_running:
+-                self._latest_position = None
+-            self._state = (
+-                BallUartState.START_REQUESTED
+-                if desired_running
+-                else BallUartState.STOPPED
+-            )
+-            if command_already_queued:
+-                self._control.appendleft(command)
+-                return False
+-            last_queued = self._last_control_reconcile_at[command]
+-            if now - last_queued < self.control_reconcile_interval_s:
+-                return False
+-            if self.enabled:
+-                self._control.appendleft(command)
+-                self._last_control_reconcile_at[command] = now
+-                return True
+-            return False
+-
+-    def _check_link_timeout(self, now: float) -> bool:
+-        """Return True after an established link expires and handshake restarts."""
+-
+-        if (
+-            not self._ready
+-            or self._last_valid_rx_at is None
+-            or now - self._last_valid_rx_at <= self.link_timeout_s
+-        ):
+-            return False
+-        self._ready = False
+-        self._state = BallUartState.WAITING_READY
+-        self.discard_pending_ball_position()
+-        LOG.warning("MSPM0 UART link timed out; returning to handshake")
+-        return True
+-
+     def _handle_line(self, raw_line: bytes) -> None:
+         try:
+             text = raw_line.decode("ascii", errors="strict").strip("\r\n")
+@@ -432,25 +350,12 @@ class BallUartClient:
+         if reply.kind == "ready":
+             self._mark_ready("ready_line")
+         elif reply.kind == "status":
+-            now = time.monotonic()
+-            self._last_valid_rx_at = now
++            self._last_valid_rx_at = time.monotonic()
+             self._status_rx_count += 1
+             self._last_status = reply.fields
+-            enabled = reply.fields.get("EN")
+-            if isinstance(enabled, int):
+-                corrected = self._reconcile_enabled_state(enabled, now)
+-                if corrected:
+-                    LOG.warning(
+-                        "MCU EN=%d differs from desired_running=%s; corrective %s queued",
+-                        enabled,
+-                        self._desired_running,
+-                        "START" if self._desired_running else "STOP",
+-                    )
+         elif reply.kind == "ok":
+             self._last_valid_rx_at = time.monotonic()
+-            if text == "OK C=BALL_PING":
+-                self._mark_ready("ping_ack")
+-            elif text == "OK P":
++            if text == "OK P":
+                 self._ok_position_rx_count += 1
+             elif text == "OK I":
+                 self._ok_invalid_rx_count += 1
+@@ -497,7 +402,7 @@ class BallUartClient:
+             self._rx_buffer.append(byte)
+ 
+     def _run(self) -> None:
+-        next_position = next_ping = next_status = next_statistics = 0.0
++        next_position = next_statistics = 0.0
+         while not self._stop_event.is_set():
+             if not self.is_connected():
+                 try:
+@@ -505,11 +410,10 @@ class BallUartClient:
+                     with self._serial_lock:
+                         self._serial = opened
+                     self._opened_at = time.monotonic()
+-                    self._ready = not self.wait_ready
+-                    self._state = BallUartState.READY if self._ready else BallUartState.WAITING_READY
+-                    self.discard_pending_ball_position()
+-                    self._last_valid_rx_at = time.monotonic() if self._ready else None
+-                    LOG.info("steel-ball UART opened: %s @ %d 8N1", self.port, self.baudrate)
++                    self._ready = True
++                    self._last_valid_rx_at = None
++                    self._prepare_open_connection()
++                    LOG.info("UART OPEN %s %d 8N1", self.port, self.baudrate)
+                     self._last_logged_error = ""
+                 except Exception as exc:
+                     self._state = BallUartState.FAULT
+@@ -527,14 +431,6 @@ class BallUartClient:
+             data: bytes | None = None
+             try:
+                 now = time.monotonic()
+-                if self._check_link_timeout(now):
+-                    next_ping = 0.0
+-                if not self._ready and now >= next_ping:
+-                    self.send_ping()
+-                    next_ping = now + self.ping_interval_s
+-                if self._ready and now >= next_status:
+-                    self.request_status()
+-                    next_status = now + self.status_interval_s
+                 data, next_position = self._next_outbound(now, next_position)
+                 if data is not None:
+                     serial_handle.write(data)
+@@ -549,9 +445,20 @@ class BallUartClient:
+                     elif data == b"BALL INVALID\r\n":
+                         self._invalid_tx_count += 1
+                         self._invalid_tx_rate.record(now)
++                        if self.debug and now - self._last_invalid_debug_at >= self.debug_position_interval_s:
++                            LOG.info("UART TX BALL INVALID")
++                            self._last_invalid_debug_at = now
++                    elif data == START_COMMAND:
++                        with self._outbound_lock:
++                            if self._desired_running:
++                                self._state = BallUartState.RUNNING
++                        if self.debug:
++                            LOG.info("UART TX BALL START")
+                     elif data == STOP_COMMAND:
+                         with self._outbound_lock:
+                             stop_is_current_intent = not self._desired_running
++                            if stop_is_current_intent:
++                                self._state = BallUartState.STOPPED
+                         if stop_is_current_intent:
+                             self._stop_sent.set()
+                         if self.debug:
+diff --git a/tests/test_ball_uart_client.py b/tests/test_ball_uart_client.py
+index e621aa1..50d119f 100644
+--- a/tests/test_ball_uart_client.py
++++ b/tests/test_ball_uart_client.py
+@@ -240,12 +240,11 @@ def test_read_failure_reconnects_and_waits_for_new_ready() -> None:
+     client.close()
+ 
+ 
+-def test_ping_ack_recovers_ready_and_requeues_one_start() -> None:
++def test_historical_ping_ack_is_diagnostic_and_does_not_requeue_start() -> None:
+     client = BallUartClient()
+     client.send_start()
+     client.feed_received(b"OK C=BALL_PING\r\n")
+-    assert client.is_ready()
+-    assert client.get_statistics()["uart_state"] == BallUartState.START_REQUESTED.value
++    assert not client.is_ready()
+     with client._outbound_lock:
+         assert list(client._control).count(encode_command("START")) == 1
+ 
+@@ -270,21 +269,21 @@ def test_cr_lf_crlf_partial_sticky_and_non_ascii_are_safe() -> None:
+ 
+ def test_overlong_line_is_discarded_and_parser_recovers() -> None:
+     client = BallUartClient()
+-    client.feed_received(b"X" * 300 + b"\rOK C=BALL_PING\n")
++    client.feed_received(b"X" * 300 + b"\rREADY BALL UART2 9600\n")
+     assert client.get_statistics()["line_overflow_count"] == 1
+     assert client.is_ready()
+ 
+ 
+-def test_link_timeout_discards_position_but_preserves_desired_running() -> None:
++def test_absent_replies_do_not_discard_position_or_stop_output() -> None:
+     client = BallUartClient()
+     client._thread = threading.current_thread()
+     client.send_start()
+-    client.feed_received(b"OK C=BALL_PING\r")
+     client.publish_ball_position(12)
+-    assert client._check_link_timeout(client._last_valid_rx_at + client.link_timeout_s + 0.01)
+-    assert not client.is_ready()
++    first, next_at = client._next_outbound(time.monotonic(), 0.0)
++    second, _ = client._next_outbound(time.monotonic(), next_at)
++    assert first == encode_command("START")
++    assert second == encode_position(12)
+     assert client._desired_running is True
+-    assert client._latest_position is None
+     client._thread = None
+ 
+ 
+@@ -476,9 +475,9 @@ def test_serial_debug_is_visible_at_info_without_position_or_ack_flood(caplog) -
+         client.close()
+     messages = [record.getMessage() for record in caplog.records]
+     joined = "\n".join(messages)
+-    assert "UART TX BALL PING" in joined
+-    assert "UART RX OK C=BALL_PING" in joined
+-    assert "UART READY source=ping_ack" in joined
++    assert "UART TX BALL PING" not in joined
++    assert "waiting for READY" not in joined
++    assert "UART OPEN /dev/ttyAMA0 9600 8N1" in joined
+     assert "UART TX BALL START" in joined
+     assert "UART RX OK C=BALL_START" in joined
+     assert "UART TX BALL STOP" in joined
+@@ -506,64 +505,27 @@ def _clear_start_stop_controls(client: BallUartClient) -> None:
+         )
+ 
+ 
+-def test_status_desired_running_true_enabled_zero_queues_one_start() -> None:
+-    client = BallUartClient(control_reconcile_interval_s=0.5)
+-    client.send_start()
+-    _clear_start_stop_controls(client)
+-    assert client._reconcile_enabled_state(0, 10.0) is True
+-    with client._outbound_lock:
+-        assert list(client._control).count(encode_command("START")) == 1
+-        assert encode_command("STOP") not in client._control
+-
+-
+-def test_status_desired_running_true_enabled_one_does_not_repeat_start() -> None:
++def test_status_enabled_zero_is_diagnostic_and_does_not_requeue_start() -> None:
+     client = BallUartClient()
+     client.send_start()
+-    assert client._reconcile_enabled_state(1, 10.0) is False
+-    with client._outbound_lock:
+-        assert encode_command("START") not in client._control
+-
+-
+-def test_status_desired_running_false_enabled_one_queues_stop_and_clears_position() -> None:
+-    client = BallUartClient()
+-    client._thread = threading.current_thread()
+-    client._latest_position = (10, encode_position(10))
+-    assert client._reconcile_enabled_state(1, 10.0) is True
+-    client._thread = None
++    _clear_start_stop_controls(client)
++    client._handle_line(b"BALL EN=0")
+     with client._outbound_lock:
+-        assert list(client._control).count(encode_command("STOP")) == 1
+         assert encode_command("START") not in client._control
+-        assert client._latest_position is None
++        assert encode_command("STOP") not in client._control
++    assert client._desired_running is True
++    assert client.get_statistics()["mcu_status"]["EN"] == 0
+ 
+ 
+-def test_status_desired_running_false_enabled_zero_does_not_repeat_stop() -> None:
++def test_status_enabled_one_is_diagnostic_and_does_not_change_stop_intent() -> None:
+     client = BallUartClient()
+     client.send_stop()
+-    assert client._reconcile_enabled_state(0, 10.0) is False
+-    with client._outbound_lock:
+-        assert encode_command("STOP") not in client._control
+-
+-
+-def test_wrong_status_is_rate_limited_and_can_retry_after_interval() -> None:
+-    client = BallUartClient(control_reconcile_interval_s=0.5)
+-    client.send_start()
+     _clear_start_stop_controls(client)
+-    for index in range(100):
+-        client._reconcile_enabled_state(0, 10.0 + index * 0.001)
++    client._handle_line(b"BALL EN=1")
+     with client._outbound_lock:
+-        assert list(client._control).count(encode_command("START")) == 1
+-        client._control.clear()
+-    assert client._reconcile_enabled_state(0, 10.49) is False
+-    assert client._reconcile_enabled_state(0, 10.51) is True
+-
+-
+-def test_user_intent_reversal_removes_old_status_correction() -> None:
+-    client = BallUartClient()
+-    assert client._reconcile_enabled_state(1, 10.0) is True
+-    client.send_start()
+-    with client._outbound_lock:
+-        assert list(client._control).count(encode_command("START")) == 1
++        assert encode_command("START") not in client._control
+         assert encode_command("STOP") not in client._control
++    assert client._desired_running is False
+ 
+ 
+ def test_status_and_late_acks_never_override_final_intent() -> None:
+@@ -592,7 +554,7 @@ def test_mission_ball_uart_defaults_match_mcu_contract() -> None:
+     "override",
+     [
+         {"line_ending": "\n"},
+-        {"control_reconcile_interval_s": 0},
++        {"wait_ready": True},
+     ],
+ )
+ def test_invalid_ball_uart_configuration_is_rejected(override) -> None:
+diff --git a/tests/test_competition_config.py b/tests/test_competition_config.py
+index 7d41864..0c112c8 100644
+--- a/tests/test_competition_config.py
++++ b/tests/test_competition_config.py
+@@ -33,7 +33,11 @@ def test_touch_ui_automatically_selects_enabled_competition_config(monkeypatch)
+     args = app.build_argument_parser().parse_args(["--touch-ui", "--no-serial"])
+     monkeypatch.setattr(app, "load_mission_config", lambda _path: {"ball_uart": {"enabled": False}})
+     monkeypatch.setattr(app, "load_camera_config", lambda _path: object())
+-    monkeypatch.setattr(app, "resolve_touch_ui_config", lambda _args: object())
++    monkeypatch.setattr(
++        app,
++        "resolve_touch_ui_config",
++        lambda _args: SimpleNamespace(startup_competition_mode=True),
++    )
+     monkeypatch.setattr(app, "configure_touch_logging", lambda: None)
+     monkeypatch.setattr(app, "create_detector", lambda _path: object())
+     monkeypatch.setattr(app, "CameraService", lambda _config: object())
+@@ -48,6 +52,7 @@ def test_touch_ui_automatically_selects_enabled_competition_config(monkeypatch)
+     assert app.main(["--touch-ui", "--no-serial"]) == 0
+     assert captured["competition_config"].enabled is True
+     assert captured["competition_config"].host == "127.0.0.1"
++    assert captured["initial_competition_mode"] is True
+ 
+ 
+ def test_vision_touch_service_template_is_byte_identical_to_head() -> None:
+diff --git a/tests/test_config_loader.py b/tests/test_config_loader.py
+index 350ae31..8688d95 100644
+--- a/tests/test_config_loader.py
++++ b/tests/test_config_loader.py
+@@ -30,7 +30,7 @@ def test_unknown_mission_field_is_rejected(tmp_path: Path) -> None:
+ 
+ @pytest.mark.parametrize(
+     ("name", "value"),
+-    [("send_rate_hz", 0), ("control_reconcile_interval_s", 0)],
++    [("send_rate_hz", 0), ("wait_ready", True)],
+ )
+ def test_invalid_uart_calibration_or_rate_is_rejected(tmp_path: Path, name: str, value: object) -> None:
+     data = yaml.safe_load(Path("config/mission.yaml").read_text(encoding="utf-8"))
+diff --git a/tests/test_touch_deploy.py b/tests/test_touch_deploy.py
+index 29cff2f..367a7b3 100644
+--- a/tests/test_touch_deploy.py
++++ b/tests/test_touch_deploy.py
+@@ -50,14 +50,15 @@ def test_local_browser_launcher_and_desktop_template_are_removed() -> None:
+     assert not (ROOT / "touch_ui/kiosk.py").exists()
+ 
+ 
+-def test_tablet_installer_never_modifies_or_restarts_visual_main_service() -> None:
++def test_tablet_installer_enables_but_never_restarts_visual_main_service() -> None:
+     install = (ROOT / "deploy/install_tablet_web.sh").read_text(encoding="utf-8")
+     uninstall = (ROOT / "deploy/uninstall_tablet_web.sh").read_text(encoding="utf-8")
+     assert "main_service_hash_before" in install and "main_service_hash_after" in install
+     # The template name is deliberately read for the before/after hash guard.  The
+-    # tablet installer must never install, enable, restart, or remove the unit.
++    # The tablet installer checks boot enablement without installing a second unit.
+     assert "/etc/systemd/system/vision-touch.service" not in install
+-    assert "systemctl enable vision-touch.service" not in install
++    assert "systemctl enable vision-touch.service" in install
++    assert "systemctl is-enabled --quiet" in install
+     assert "systemctl restart vision-touch.service" not in install
+     assert "systemctl stop vision-touch.service" not in install
+     assert "vision-touch.service" not in uninstall
+diff --git a/tests/test_uart_no_handshake_autostart.py b/tests/test_uart_no_handshake_autostart.py
+new file mode 100644
+index 0000000..e2fc8e2
+--- /dev/null
++++ b/tests/test_uart_no_handshake_autostart.py
+@@ -0,0 +1,165 @@
++from __future__ import annotations
++
++from pathlib import Path
++import threading
++import time
++
++from core.config_loader import load_mission_config
++from drivers.ball_uart_client import BallUartClient, encode_command, encode_position
++from touch_ui.models import load_touch_ui_config
++
++
++ROOT = Path(__file__).resolve().parents[1]
++START = encode_command("START")
++STOP = encode_command("STOP")
++INVALID = encode_command("INVALID")
++PING = encode_command("PING")
++
++
++class SilentSerial:
++    def __init__(self, *, disconnect_once: bool = False) -> None:
++        self.written: list[bytes] = []
++        self.closed = False
++        self.disconnect_once = disconnect_once
++
++    def write(self, data: bytes) -> int:
++        self.written.append(bytes(data))
++        return len(data)
++
++    def read(self, _size: int = 128) -> bytes:
++        if self.disconnect_once and START in self.written:
++            self.disconnect_once = False
++            raise OSError("simulated disconnect")
++        time.sleep(0.001)
++        return b""
++
++    def close(self) -> None:
++        self.closed = True
++
++
++def wait_until(predicate, timeout: float = 1.0) -> None:
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        if predicate():
++            return
++        time.sleep(0.002)
++    raise AssertionError("condition timed out")
++
++
++def test_silent_mcu_gets_start_positions_invalid_and_stop_without_ping() -> None:
++    fake = SilentSerial()
++    client = BallUartClient(
++        serial_factory=lambda **_kwargs: fake,
++        send_rate_hz=1000,
++    )
++    client.send_start()
++    client.start()
++    wait_until(lambda: START in fake.written)
++    for value in (12, 10, 8):
++        assert client.publish_ball_position(value)
++        wait_until(lambda value=value: encode_position(value) in fake.written)
++    assert client.send_invalid()
++    wait_until(lambda: INVALID in fake.written)
++    client.close()
++
++    assert fake.written == [
++        START,
++        encode_position(12),
++        encode_position(10),
++        encode_position(8),
++        INVALID,
++        STOP,
++    ]
++    assert PING not in fake.written
++
++
++def test_reconnect_sends_one_start_per_connection_and_no_stale_position() -> None:
++    first = SilentSerial(disconnect_once=True)
++    second = SilentSerial()
++    second_open_allowed = threading.Event()
++    calls = 0
++
++    def factory(**_kwargs):
++        nonlocal calls
++        calls += 1
++        if calls == 1:
++            return first
++        assert second_open_allowed.wait(1.0)
++        return second
++
++    client = BallUartClient(
++        serial_factory=factory,
++        reconnect_interval_s=0.005,
++        send_rate_hz=1000,
++    )
++    client.send_start()
++    client.start()
++    wait_until(lambda: START in first.written)
++    wait_until(lambda: first.closed)
++    client.publish_ball_position(99)
++    second_open_allowed.set()
++    wait_until(lambda: START in second.written)
++    assert first.written.count(START) == 1
++    assert second.written.count(START) == 1
++    assert encode_position(99) not in second.written
++    client.publish_ball_position(8)
++    wait_until(lambda: encode_position(8) in second.written)
++    client.close()
++    assert PING not in first.written + second.written
++
++
++def test_latest_only_and_user_stop_are_independent_of_replies() -> None:
++    client = BallUartClient()
++    client._thread = threading.current_thread()
++    client.send_start()
++    client._next_outbound(time.monotonic(), 0.0)
++    client.publish_ball_position(12)
++    client.publish_ball_position(10)
++    client.publish_ball_position(8)
++    data, _ = client._next_outbound(time.monotonic(), 0.0)
++    assert data == encode_position(8)
++    client.send_stop()
++    stop, _ = client._next_outbound(time.monotonic(), 0.0)
++    assert stop == STOP
++    assert client._desired_running is False
++    assert client._latest_position is None
++    client._thread = None
++
++
++def test_default_configs_enable_no_handshake_boot_output() -> None:
++    uart = load_mission_config()["ball_uart"]
++    touch = load_touch_ui_config()
++    assert uart["port"] == "/dev/ttyAMA0"
++    assert uart["baudrate"] == 9600
++    assert uart["wait_ready"] is False
++    assert touch.startup_competition_mode is True
++
++
++def test_single_hardware_owner_and_single_boot_service() -> None:
++    app_source = (ROOT / "app.py").read_text(encoding="utf-8")
++    deploy_sources = "\n".join(
++        path.read_text(encoding="utf-8")
++        for path in (ROOT / "deploy").rglob("*")
++        if path.is_file() and path.suffix in {".sh", ".service", ".template", ".py"}
++    )
++    assert app_source.count("BallUartClient(") == 1
++    assert app_source.count("CameraService(") == 1
++    assert "camera-uart.service" not in deploy_sources
++    assert "serial.service" not in deploy_sources
++    assert "tools.test_ball_uart" not in deploy_sources
++
++
++def test_vision_touch_service_is_boot_enabled_by_both_installers() -> None:
++    service = (ROOT / "deploy/vision-touch.service.template").read_text(encoding="utf-8")
++    touch_installer = (ROOT / "deploy/install_touch_ui.sh").read_text(encoding="utf-8")
++    tablet_installer = (ROOT / "deploy/install_tablet_web.sh").read_text(encoding="utf-8")
++    assert "WantedBy=multi-user.target" in service
++    assert "Restart=on-failure" in service and "RestartSec=3" in service
++    assert "--serial-port /dev/ttyAMA0" in service
++    assert "--baudrate 9600" in service
++    assert "--serial-rate 50" in service
++    assert "--headless" in service
++    for installer in (touch_installer, tablet_installer):
++        assert "systemctl daemon-reload" in installer
++        assert "systemctl enable vision-touch.service" in installer
++        assert "systemctl is-enabled --quiet" in installer
