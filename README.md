@@ -142,6 +142,17 @@ python3 -m tools.steel_ball_ncnn_offline \
 
 输出包含是否识别、中心 X/Y、置信度和推理耗时。当前 Python 环境没有 `ncnn` 时会明确报错并返回非零退出码。
 
+钢球模型采用 baseline/candidate 双目录管理，正式配置默认保持 baseline。验证、查看和切换命令：
+
+```bash
+python tools/validate_steel_ball_models.py
+python tools/switch_steel_ball_model.py status
+python tools/switch_steel_ball_model.py candidate
+python tools/switch_steel_ball_model.py baseline
+```
+
+目录说明见 [`models/steel_ball/README.md`](models/steel_ball/README.md)，完整 A/B 测试与回退流程见 [`docs/STEEL_BALL_MODELS.md`](docs/STEEL_BALL_MODELS.md)。
+
 摄像头 V4L2 配置检查：
 
 ```bash

@@ -1,7 +1,10 @@
+* text=auto
 *.py text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.md text eol=lf
+*.json text eol=lf
+*.param text eol=lf
 *.toml text eol=lf
 *.txt text eol=lf
 *.html text eol=lf
@@ -13,3 +16,8 @@
 *.template text eol=lf
 .gitignore text eol=lf
 .gitattributes text eol=lf
+*.bin binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.mp4 binary
