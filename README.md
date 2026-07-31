@@ -278,3 +278,7 @@ npx playwright install chromium
 Windows 可导入全部生产模块并运行无硬件测试；V4L2、串口、NetworkManager、systemd 和 Nginx 相关自动测试使用 mock 或静态检查。真实热点创建与重启恢复、DHCP、多型号平板连接、Nginx 绑定、实时 MJPEG、真实摄像头、UART 电气连接、MCU 复位恢复及实际位置发送频率必须在 Raspberry Pi 5 上现场验证。
 
 旧多检测器、旧二进制通信、训练数据和历史录制/标定工具已从部署工程移除；模型权重位于 `models/steel_ball/best_ncnn_model/`，本次清理不修改模型参数或二进制权重。
+
+# 钢球双模型同视频离线比较
+
+使用 `python tools/compare_steel_ball_models_video.py --video path/to/compare_source.mp4 --write-videos` 对 baseline 与 candidate 做同帧 A/B 比较。CSV、JSON、中文报告和标注视频默认写入 `runs/model_compare/`；详细参数见 `docs/STEEL_BALL_MODELS.md`。
