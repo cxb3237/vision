@@ -11,8 +11,15 @@ import cv2
 import numpy as np
 
 from core.models import FramePacket, SteelBallNcnnConfig, TargetState, VisionResult
+from core.pipe_corridor import (
+    PipeAxis,
+    PipeCorridorDecision,
+    PipeCorridorFilter,
+    effective_corridor_half_width_px,
+)
 from core.performance_metrics import RollingSamples
 from detectors.base_detector import BaseDetector
+from detectors.pipe_marker_detector import PipeMarkerDetector
 from inference.steel_ball_ncnn_runtime import SteelBallNcnnRuntime
 
 
@@ -104,11 +111,18 @@ class SteelBallYoloNcnnDetector(BaseDetector):
         config: SteelBallNcnnConfig,
         *,
         runtime_factory: Callable[..., Any] = SteelBallNcnnRuntime,
+        pipe_marker_detector: Any = None,
     ) -> None:
         if config.backend != "ncnn":
             raise ValueError("SteelBallYoloNcnnDetector requires backend=ncnn")
         self.config = config
         self.target_class = int(config.target_class)
+        if config.pipe_roi.enabled and pipe_marker_detector is None:
+            from core.config_loader import load_pipe_mapping_config
+
+            pipe_marker_detector = PipeMarkerDetector(load_pipe_mapping_config())
+        self.pipe_marker_detector = pipe_marker_detector
+        self.pipe_roi_filter = PipeCorridorFilter(config.pipe_roi)
         self.runtime = runtime_factory(
             model_dir=config.model_path,
             imgsz=config.imgsz,
@@ -124,7 +138,15 @@ class SteelBallYoloNcnnDetector(BaseDetector):
         self._shape_logged = False
         self._last_error_log_at = float("-inf")
         self._detections: list[dict[str, Any]] = []
+        self._raw_detections: list[dict[str, Any]] = []
+        self._roi_rejected: list[dict[str, Any]] = []
+        self._roi_decisions: list[PipeCorridorDecision] = []
         self._selected: dict[str, Any] | None = None
+        self._pipe_markers: tuple[Any, Any] = (None, None)
+        self._roi_axis: PipeAxis | None = None
+        self._roi_geometry_age_ms: float | None = None
+        self._effective_half_width_px: float | None = None
+        self._roi_last_reason = "disabled"
         self._last_timings = {
             "preprocess": 0.0,
             "inference": 0.0,
@@ -163,7 +185,11 @@ class SteelBallYoloNcnnDetector(BaseDetector):
         """Clear per-frame debug state; model ownership and tracking stay separate."""
 
         self._detections = []
+        self._raw_detections = []
+        self._roi_rejected = []
+        self._roi_decisions = []
         self._selected = None
+        self._roi_last_reason = "disabled" if not self.config.pipe_roi.enabled else "geometry_missing"
         self.detector_error = ""
 
     def close(self) -> None:
@@ -223,13 +249,73 @@ class SteelBallYoloNcnnDetector(BaseDetector):
             return self._empty_result(frame, now)
 
         try:
+            roi_now_ms = now * 1000.0
+            if self.config.pipe_roi.enabled:
+                marker_a = marker_b = None
+                if self.pipe_marker_detector is not None:
+                    marker_a, marker_b = self.pipe_marker_detector.detect(image)
+                self._pipe_markers = (marker_a, marker_b)
+                # pipe_mapping marker A is right/blue; B is left/red.
+                self.pipe_roi_filter.update_axis(
+                    marker_b,
+                    marker_a,
+                    (image.shape[1], image.shape[0]),
+                    now_ms=roi_now_ms,
+                )
+                self._roi_axis, self._roi_geometry_age_ms = self.pipe_roi_filter.current_axis(
+                    now_ms=roi_now_ms
+                )
+                self._effective_half_width_px = (
+                    effective_corridor_half_width_px(
+                        self._roi_axis.length_px,
+                        self.config.pipe_roi,
+                    )
+                    if self._roi_axis is not None
+                    else None
+                )
             prediction = self.runtime.predict(image)
             raw_detections = prediction.get("detections", [])
             if not isinstance(raw_detections, list):
                 raise ValueError("NCNN detections must be a list")
-            selected, detections = select_primary_detection(
+            _unfiltered_selected, detections = select_primary_detection(
                 raw_detections, image.shape[1], image.shape[0]
             )
+            self._raw_detections = detections
+            if self.config.pipe_roi.enabled:
+                accepted: list[dict[str, Any]] = []
+                rejected: list[dict[str, Any]] = []
+                decisions: list[PipeCorridorDecision] = []
+                for detection in detections:
+                    decision = self.pipe_roi_filter.decide_box(
+                        detection,
+                        (image.shape[1], image.shape[0]),
+                        now_ms=roi_now_ms,
+                    )
+                    decisions.append(decision)
+                    (accepted if decision.accepted else rejected).append(detection)
+                selected, accepted = select_primary_detection(
+                    accepted, image.shape[1], image.shape[0]
+                )
+                self._detections = accepted
+                self._roi_rejected = rejected
+                self._roi_decisions = decisions
+                if selected is not None:
+                    self._roi_last_reason = "accepted"
+                elif decisions:
+                    self._roi_last_reason = decisions[0].reason
+                elif self._roi_axis is None:
+                    self._roi_last_reason = "geometry_missing"
+                else:
+                    self._roi_last_reason = "no_detections"
+            else:
+                selected = _unfiltered_selected
+                self._detections = detections
+                self._roi_rejected = []
+                self._roi_decisions = []
+                self._roi_axis = None
+                self._roi_geometry_age_ms = None
+                self._effective_half_width_px = None
+                self._roi_last_reason = "disabled"
             timings = prediction.get("timings_ms", {})
             self._last_timings = {
                 name: max(0.0, float(timings.get(name, 0.0)))
@@ -237,7 +323,6 @@ class SteelBallYoloNcnnDetector(BaseDetector):
             }
             for name, value in self._last_timings.items():
                 self._timing_history[name].add(value)
-            self._detections = detections
             self._selected = selected
             self.detector_error = ""
             if self.config.debug_tensor_shapes and not self._shape_logged:
@@ -249,6 +334,9 @@ class SteelBallYoloNcnnDetector(BaseDetector):
                 self._shape_logged = True
         except Exception as exc:
             self._detections = []
+            self._raw_detections = []
+            self._roi_rejected = []
+            self._roi_decisions = []
             self._selected = None
             self._record_error(str(exc), exc)
             return self._empty_result(frame, time.monotonic())
@@ -303,6 +391,45 @@ class SteelBallYoloNcnnDetector(BaseDetector):
             "ncnn_total_p95_ms": round(float(summaries["total"]["p95"]), 3),
             "estimated_fps": round(1000.0 / total_ms, 2) if total_ms > 0.0 else 0.0,
             "detection_count": len(self._detections),
+            "raw_detection_count": len(self._raw_detections),
+            "roi_accepted_count": len(self._detections),
+            "roi_rejected_count": len(self._roi_rejected),
+            "roi_geometry_valid": self._roi_axis is not None if self.config.pipe_roi.enabled else None,
+            "roi_geometry_age_ms": (
+                round(self._roi_geometry_age_ms, 3)
+                if self._roi_geometry_age_ms is not None
+                else None
+            ),
+            "effective_half_width_px": (
+                round(self._effective_half_width_px, 3)
+                if self._effective_half_width_px is not None
+                else None
+            ),
+            "selected_after_roi": bool(self._selected) if self.config.pipe_roi.enabled else None,
+            "roi_rejection_reasons": {
+                reason: sum(decision.reason == reason for decision in self._roi_decisions)
+                for reason in sorted({decision.reason for decision in self._roi_decisions})
+                if reason != "accepted"
+            },
+            "pipe_roi_enabled": bool(self.config.pipe_roi.enabled),
+            "pipe_roi_geometry_valid": self._roi_axis is not None if self.config.pipe_roi.enabled else None,
+            "pipe_roi_axis_length_px": (
+                round(self._roi_axis.length_px, 3) if self._roi_axis is not None else None
+            ),
+            "pipe_roi_geometry_age_ms": (
+                round(self._roi_geometry_age_ms, 3)
+                if self._roi_geometry_age_ms is not None
+                else None
+            ),
+            "pipe_roi_effective_half_width_px": (
+                round(self._effective_half_width_px, 3)
+                if self._effective_half_width_px is not None
+                else None
+            ),
+            "pipe_roi_raw_count": len(self._raw_detections),
+            "pipe_roi_accepted_count": len(self._detections),
+            "pipe_roi_rejected_count": len(self._roi_rejected),
+            "pipe_roi_last_reason": self._roi_last_reason,
             "selected_target_confidence": (
                 round(float(self._selected["confidence"]), 6) if self._selected else 0.0
             ),
@@ -310,10 +437,62 @@ class SteelBallYoloNcnnDetector(BaseDetector):
             "detector_error": self.detector_error,
         }
 
+    def get_pipe_markers(self) -> tuple[Any, Any]:
+        """Return the current frame's right/blue A and left/red B markers."""
+
+        return self._pipe_markers
+
+    def get_roi_debug_snapshot(self) -> dict[str, Any]:
+        axis = self._roi_axis
+        return {
+            "enabled": bool(self.config.pipe_roi.enabled),
+            "geometry_valid": axis is not None if self.config.pipe_roi.enabled else None,
+            "geometry_age_ms": self._roi_geometry_age_ms,
+            "axis": (
+                {
+                    "left": list(axis.left_endpoint),
+                    "right": list(axis.right_endpoint),
+                    "length_px": axis.length_px,
+                }
+                if axis is not None
+                else None
+            ),
+            "corridor_half_width_px": float(self.config.pipe_roi.corridor_half_width_px),
+            "corridor_half_width_ratio": float(self.config.pipe_roi.corridor_half_width_ratio),
+            "effective_half_width_px": self._effective_half_width_px,
+            "minimum_axis_length_px": float(self.config.pipe_roi.minimum_axis_length_px),
+            "end_margin_px": float(self.config.pipe_roi.end_margin_px),
+            "conf_threshold": float(self.config.conf_threshold),
+            "raw_detections": [dict(item) for item in self._raw_detections],
+            "accepted_detections": [dict(item) for item in self._detections],
+            "rejected_detections": [dict(item) for item in self._roi_rejected],
+            "selected": dict(self._selected) if self._selected is not None else None,
+            "reason": self._roi_last_reason,
+        }
+
     def draw_debug(self, image: np.ndarray, result: VisionResult) -> np.ndarray:
         """Draw every valid NCNN box while highlighting the selected target."""
 
         output = image.copy()
+        if self.config.pipe_roi.enabled and self.config.pipe_roi.debug_overlay:
+            for detection in self._roi_rejected:
+                cv2.rectangle(
+                    output,
+                    (detection["x1"], detection["y1"]),
+                    (detection["x2"], detection["y2"]),
+                    (0, 0, 255),
+                    2,
+                )
+                cv2.putText(
+                    output,
+                    "ROI REJECTED",
+                    (detection["x1"], max(18, detection["y1"] - 7)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
         selected_box = None
         if self._selected is not None:
             selected_box = (
@@ -362,13 +541,46 @@ class SteelBallYoloNcnnDetector(BaseDetector):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 0, 0), 2, cv2.LINE_AA,
             )
         if marker_b is not None:
-            cv2.circle(output, marker_b, 6, (0, 255, 0), -1)
+            cv2.circle(output, marker_b, 6, (0, 0, 255), -1)
             cv2.putText(
                 output, "B", (marker_b[0] + 8, marker_b[1] - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA,
             )
-        if marker_a is not None and marker_b is not None:
-            cv2.line(output, marker_a, marker_b, (255, 255, 0), 2, cv2.LINE_AA)
+        if self.config.pipe_roi.enabled and self.config.pipe_roi.debug_overlay and self._roi_axis is not None:
+            left = self._roi_axis.left_endpoint
+            right = self._roi_axis.right_endpoint
+            length = self._roi_axis.length_px
+            normal = (-(right[1] - left[1]) / length, (right[0] - left[0]) / length)
+            half = self._effective_half_width_px
+            if half is None:
+                half = self.config.pipe_roi.corridor_half_width_px
+            for sign in (-1.0, 1.0):
+                p0 = (int(round(left[0] + sign * normal[0] * half)), int(round(left[1] + sign * normal[1] * half)))
+                p1 = (int(round(right[0] + sign * normal[0] * half)), int(round(right[1] + sign * normal[1] * half)))
+                cv2.line(output, p0, p1, (255, 255, 0), 1, cv2.LINE_AA)
+            cv2.line(
+                output,
+                (int(round(left[0])), int(round(left[1]))),
+                (int(round(right[0])), int(round(right[1]))),
+                (255, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            roi_text = (
+                f"PIPE ROI VALID RAW {len(self._raw_detections)} "
+                f"ACCEPTED {len(self._detections)} REJECTED {len(self._roi_rejected)} "
+                f"HALF {half:.2f}px"
+            )
+            cv2.putText(
+                output,
+                roi_text,
+                (12, 118),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
         position_text = (
             f"X = {result.ball_position_mm:+.1f} mm"
             if result.ball_position_mm is not None

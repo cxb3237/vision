@@ -282,3 +282,5 @@ Windows 可导入全部生产模块并运行无硬件测试；V4L2、串口、Ne
 # 钢球双模型同视频离线比较
 
 使用 `python tools/compare_steel_ball_models_video.py --video path/to/compare_source.mp4 --write-videos` 对 baseline 与 candidate 做同帧 A/B 比较。CSV、JSON、中文报告和标注视频默认写入 `runs/model_compare/`；详细参数见 `docs/STEEL_BALL_MODELS.md`。
+
+Candidate 第一阶段先用同为 conf=0.40 的 `candidate` 与 `candidate-roi` 隔离比较 ROI 效果，再用 `candidate-roi` 与 conf=0.50 的 `candidate-roi-strict` 比较阈值效果。动态走廊半宽按当前红蓝端点轴长的 0.04 计算；命令与困难帧流程见 `docs/STEEL_BALL_MODELS.md`。

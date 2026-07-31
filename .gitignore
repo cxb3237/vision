@@ -60,6 +60,7 @@ Thumbs.db
 
 # Steel-ball offline model comparison artifacts
 runs/model_compare/
+runs/hard_frames/
 compare_source.mp4
 *_annotated.mp4
 *_annotated.avi

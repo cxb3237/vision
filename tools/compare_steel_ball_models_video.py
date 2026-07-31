@@ -27,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.config_loader import ConfigError, load_steel_ball_ncnn_config
 from core.models import FramePacket
+from core.pipe_corridor import PipeAxis, PipeCorridorConfig, evaluate_pipe_corridor
 from detectors.steel_ball_yolo_ncnn_detector import SteelBallYoloNcnnDetector
 
 
@@ -43,6 +44,14 @@ MODEL_FIELDS = (
     "box_height",
     "inference_ms",
 )
+MODEL_ROI_FIELDS = (
+    "raw_detection_count",
+    "roi_geometry_valid",
+    "roi_accepted_count",
+    "roi_rejected_count",
+    "roi_selected",
+    "roi_reason",
+)
 FRAME_FIELDS = (
     "frame_index",
     "timestamp_ms",
@@ -52,6 +61,11 @@ FRAME_FIELDS = (
     "near_duplicate_frame",
     *(f"baseline_{name}" for name in MODEL_FIELDS),
     *(f"candidate_{name}" for name in MODEL_FIELDS),
+    *(f"baseline_{name}" for name in MODEL_ROI_FIELDS),
+    *(f"candidate_{name}" for name in MODEL_ROI_FIELDS),
+    "candidate_raw_reference_roi_accepted",
+    "candidate_raw_reference_roi_reason",
+    "candidate_low_conf_inside_roi_count",
     "both_detected",
     "baseline_only",
     "candidate_only",
@@ -62,7 +76,6 @@ FRAME_FIELDS = (
 FAIR_CONFIG_FIELDS = (
     "backend",
     "imgsz",
-    "conf_threshold",
     "iou_threshold",
     "max_det",
     "num_threads",
@@ -202,10 +215,26 @@ def motion_level(score: float, thresholds: dict[str, float]) -> str:
 
 def _detector_row(result: Any, detector: Any) -> dict[str, Any]:
     status = detector.get_runtime_status()
+    snapshot_fn = getattr(detector, "get_roi_debug_snapshot", None)
+    snapshot = snapshot_fn() if callable(snapshot_fn) else {}
     inference_ms = float(status.get("inference_ms", 0.0))
     if not math.isfinite(inference_ms) or inference_ms < 0.0:
         raise RuntimeError(f"Detector 返回了无效 inference_ms: {inference_ms}")
-    if not bool(result.found):
+    found = bool(result.found)
+    raw_count = int(status.get("raw_detection_count", 1 if found else 0))
+    roi_enabled = bool(status.get("pipe_roi_enabled", False))
+    roi_values = {
+        "raw_detection_count": raw_count,
+        "roi_geometry_valid": (
+            int(bool(status.get("roi_geometry_valid"))) if roi_enabled else ""
+        ),
+        "roi_accepted_count": int(status.get("roi_accepted_count", raw_count)),
+        "roi_rejected_count": int(status.get("roi_rejected_count", 0)),
+        "roi_selected": int(bool(status.get("selected_after_roi"))) if roi_enabled else int(found),
+        "roi_reason": str(status.get("pipe_roi_last_reason", "disabled")),
+        "_roi_debug": snapshot,
+    }
+    if not found:
         return {
             "detected": 0,
             "confidence": "",
@@ -218,6 +247,7 @@ def _detector_row(result: Any, detector: Any) -> dict[str, Any]:
             "box_width": "",
             "box_height": "",
             "inference_ms": inference_ms,
+            **roi_values,
         }
     x1 = int(result.bbox_x)
     y1 = int(result.bbox_y)
@@ -235,6 +265,7 @@ def _detector_row(result: Any, detector: Any) -> dict[str, Any]:
         "box_width": width,
         "box_height": height,
         "inference_ms": inference_ms,
+        **roi_values,
     }
 
 
@@ -365,10 +396,59 @@ def merge_passes(
         }
         row.update({f"baseline_{name}": baseline[name] for name in MODEL_FIELDS})
         row.update({f"candidate_{name}": candidate[name] for name in MODEL_FIELDS})
+        row.update({f"baseline_{name}": baseline[name] for name in MODEL_ROI_FIELDS})
+        row.update({f"candidate_{name}": candidate[name] for name in MODEL_ROI_FIELDS})
+        row["_baseline_roi_debug"] = baseline.get("_roi_debug", {})
+        row["_candidate_roi_debug"] = candidate.get("_roi_debug", {})
         baseline_found = bool(baseline["detected"])
         candidate_found = bool(candidate["detected"])
+        raw_reference_accepted: int | str = ""
+        raw_reference_reason = ""
+        low_conf_inside_count = 0
+        debug = candidate.get("_roi_debug", {})
+        axis_data = debug.get("axis") if isinstance(debug, dict) else None
+        if baseline_found and debug.get("enabled") and axis_data:
+            axis = PipeAxis(
+                tuple(axis_data["left"]),
+                tuple(axis_data["right"]),
+                0.0,
+            )
+            decision = evaluate_pipe_corridor(
+                axis,
+                (float(baseline["center_x"]), float(baseline["center_y"])),
+                PipeCorridorConfig(
+                    enabled=True,
+                    minimum_axis_length_px=float(debug["minimum_axis_length_px"]),
+                    corridor_half_width_ratio=float(debug.get("corridor_half_width_ratio", 0.0)),
+                    corridor_half_width_px=float(debug["corridor_half_width_px"]),
+                    end_margin_px=float(debug["end_margin_px"]),
+                ),
+            )
+            raw_reference_accepted = int(decision.accepted)
+            raw_reference_reason = decision.reason
+            baseline_debug = baseline.get("_roi_debug", {})
+            candidate_threshold = float(debug.get("conf_threshold", 0.50))
+            for detection in baseline_debug.get("raw_detections", []):
+                confidence = float(detection.get("confidence", 0.0))
+                if confidence >= candidate_threshold:
+                    continue
+                low_decision = evaluate_pipe_corridor(
+                    axis,
+                    (float(detection["center_x"]), float(detection["center_y"])),
+                    PipeCorridorConfig(
+                        enabled=True,
+                        minimum_axis_length_px=float(debug["minimum_axis_length_px"]),
+                        corridor_half_width_ratio=float(debug.get("corridor_half_width_ratio", 0.0)),
+                        corridor_half_width_px=float(debug["corridor_half_width_px"]),
+                        end_margin_px=float(debug["end_margin_px"]),
+                    ),
+                )
+                low_conf_inside_count += int(low_decision.accepted)
         row.update(
             {
+                "candidate_raw_reference_roi_accepted": raw_reference_accepted,
+                "candidate_raw_reference_roi_reason": raw_reference_reason,
+                "candidate_low_conf_inside_roi_count": low_conf_inside_count,
                 "both_detected": int(baseline_found and candidate_found),
                 "baseline_only": int(baseline_found and not candidate_found),
                 "candidate_only": int(candidate_found and not baseline_found),
@@ -471,6 +551,30 @@ def model_summary(rows: list[dict[str, Any]], prefix: str, fps: float) -> dict[s
         summary[f"{level}_frames"] = len(level_rows)
         summary[f"{level}_detected_frames"] = found
         summary[f"{level}_detected_ratio"] = ratio(found, len(level_rows))
+        raw_boxes = sum(int(row[f"{prefix}_raw_detection_count"]) for row in level_rows)
+        accepted_boxes = sum(int(row[f"{prefix}_roi_accepted_count"]) for row in level_rows)
+        summary[f"{level}_roi_accepted_ratio"] = ratio(accepted_boxes, raw_boxes)
+    roi_rows = [row for row in rows if row[f"{prefix}_roi_geometry_valid"] != ""]
+    geometry_valid = sum(bool(row[f"{prefix}_roi_geometry_valid"]) for row in roi_rows)
+    raw_total = sum(int(row[f"{prefix}_raw_detection_count"]) for row in rows)
+    accepted_total = sum(int(row[f"{prefix}_roi_accepted_count"]) for row in rows)
+    rejected_total = sum(int(row[f"{prefix}_roi_rejected_count"]) for row in rows)
+    summary.update(
+        {
+            "roi_enabled_frames": len(roi_rows),
+            "roi_geometry_valid_frames": geometry_valid,
+            "roi_geometry_invalid_frames": len(roi_rows) - geometry_valid,
+            "raw_detection_box_count": raw_total,
+            "roi_accepted_box_count": accepted_total,
+            "roi_rejected_box_count": rejected_total,
+            "roi_outside_output_ratio": ratio(rejected_total, raw_total),
+            "geometry_invalid_no_output_frames": sum(
+                row[f"{prefix}_roi_geometry_valid"] == 0
+                and not row[f"{prefix}_detected"]
+                for row in roi_rows
+            ),
+        }
+    )
     return summary
 
 
@@ -488,12 +592,27 @@ def comparison_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     result["mean_center_x_difference_px"] = safe_mean(differences)
     result["p95_center_x_difference_px"] = percentile(differences, 95)
+    result["confidence_threshold_removed_frames"] = sum(
+        int(row["candidate_low_conf_inside_roi_count"]) > 0
+        and not bool(row["candidate_detected"])
+        for row in rows
+    )
+    result["roi_only_changed_frames"] = sum(
+        bool(row["baseline_detected"])
+        and bool(row["candidate_roi_geometry_valid"])
+        and int(row["candidate_raw_detection_count"]) > 0
+        and int(row["candidate_roi_accepted_count"]) == 0
+        for row in rows
+    )
+    result["raw_reference_outside_roi_frames"] = sum(
+        row["candidate_raw_reference_roi_accepted"] == 0 for row in rows
+    )
     return result
 
 
 def write_frames_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8-sig") as stream:
-        writer = csv.DictWriter(stream, fieldnames=FRAME_FIELDS)
+        writer = csv.DictWriter(stream, fieldnames=FRAME_FIELDS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -505,9 +624,10 @@ def write_model_partial_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "source_fps",
         "motion_score",
         *MODEL_FIELDS,
+        *MODEL_ROI_FIELDS,
     )
     with path.open("w", newline="", encoding="utf-8-sig") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -545,6 +665,63 @@ def annotate_frame(frame: np.ndarray, row: dict[str, Any], prefix: str, label: s
         f"{label} | frame={row['frame_index']} | t={float(row['timestamp_ms']):.1f}ms",
         f"motion={row['motion_level']}",
     ]
+    debug = row.get(f"_{prefix}_roi_debug", {})
+    if isinstance(debug, dict) and debug.get("enabled"):
+        for detection in debug.get("raw_detections", []):
+            cv2.rectangle(
+                output,
+                (int(detection["x1"]), int(detection["y1"])),
+                (int(detection["x2"]), int(detection["y2"])),
+                (0, 180, 255),
+                1,
+            )
+        for detection in debug.get("rejected_detections", []):
+            cv2.rectangle(
+                output,
+                (int(detection["x1"]), int(detection["y1"])),
+                (int(detection["x2"]), int(detection["y2"])),
+                (0, 0, 255),
+                2,
+            )
+        axis = debug.get("axis")
+        if axis:
+            left = np.asarray(axis["left"], dtype=np.float64)
+            right = np.asarray(axis["right"], dtype=np.float64)
+            vector = right - left
+            length = float(np.linalg.norm(vector))
+            if length > 0.0:
+                normal = np.asarray((-vector[1], vector[0])) / length
+                half = float(
+                    debug.get("effective_half_width_px")
+                    or debug["corridor_half_width_px"]
+                )
+                for sign in (-1.0, 1.0):
+                    p0 = tuple(int(value) for value in np.rint(left + sign * normal * half))
+                    p1 = tuple(int(value) for value in np.rint(right + sign * normal * half))
+                    cv2.line(output, p0, p1, (255, 255, 0), 1, cv2.LINE_AA)
+                left_point = tuple(int(value) for value in np.rint(left))
+                right_point = tuple(int(value) for value in np.rint(right))
+                cv2.line(
+                    output,
+                    left_point,
+                    right_point,
+                    (255, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.circle(output, left_point, 5, (0, 0, 255), -1)
+                cv2.circle(output, right_point, 5, (255, 0, 0), -1)
+        valid_text = "PIPE ROI VALID" if debug.get("geometry_valid") else "PIPE ROI INVALID"
+        selected_text = "ROI ACCEPTED" if row[f"{prefix}_roi_selected"] else "ROI REJECTED"
+        lines.extend(
+            [
+                f"{valid_text} | {selected_text}",
+                f"RAW {row[f'{prefix}_raw_detection_count']} "
+                f"ACCEPTED {row[f'{prefix}_roi_accepted_count']} "
+                f"REJECTED {row[f'{prefix}_roi_rejected_count']} "
+                f"HALF {float(debug.get('effective_half_width_px') or debug['corridor_half_width_px']):.2f}px",
+            ]
+        )
     if found:
         p1 = (int(row[f"{prefix}_x1"]), int(row[f"{prefix}_y1"]))
         p2 = (int(row[f"{prefix}_x2"]), int(row[f"{prefix}_y2"]))
@@ -583,6 +760,10 @@ def render_videos(
     rows: list[dict[str, Any]],
     *,
     frame_step: int,
+    baseline_name: str = "baseline",
+    candidate_name: str = "candidate",
+    baseline_confidence: float | None = None,
+    candidate_confidence: float | None = None,
     writer_factory: Callable[..., Any] = cv2.VideoWriter,
 ) -> list[dict[str, Any]]:
     width = int(rows[0].get("source_width", 0))
@@ -617,8 +798,8 @@ def render_videos(
                 break
             row = wanted.get(frame_index)
             if row is not None:
-                baseline = annotate_frame(frame, row, "baseline", "BASELINE")
-                candidate = annotate_frame(frame, row, "candidate", "CANDIDATE")
+                baseline = annotate_frame(frame, row, "baseline", baseline_name.upper())
+                candidate = annotate_frame(frame, row, "candidate", candidate_name.upper())
                 side = np.hstack((baseline, candidate))
                 if row["baseline_only"]:
                     state = "BASELINE ONLY"
@@ -629,6 +810,8 @@ def render_videos(
                 else:
                     state = "BOTH DETECTED"
                 header = (
+                    f"{baseline_name} conf={baseline_confidence} | "
+                    f"{candidate_name} conf={candidate_confidence} | "
                     f"frame={frame_index} t={float(row['timestamp_ms']):.1f}ms "
                     f"motion={row['motion_level']} | {state}"
                 )
@@ -676,6 +859,8 @@ def build_report(summary: dict[str, Any]) -> str:
     candidate = summary["candidate"]
     comparison = summary["comparison"]
     duplicate = summary["duplicate_frames"]
+    baseline_name = summary.get("names", {}).get("baseline", "baseline")
+    candidate_name = summary.get("names", {}).get("candidate", "candidate")
 
     def fmt(value: Any, digits: int = 3) -> str:
         return "N/A" if value is None else f"{float(value):.{digits}f}"
@@ -718,16 +903,16 @@ def build_report(summary: dict[str, Any]) -> str:
     )
     conclusion = []
     if baseline["detected_frame_ratio"] != candidate["detected_frame_ratio"]:
-        winner = "Baseline" if baseline["detected_frame_ratio"] > candidate["detected_frame_ratio"] else "Candidate"
+        winner = baseline_name if baseline["detected_frame_ratio"] > candidate["detected_frame_ratio"] else candidate_name
         conclusion.append(f"- {winner} 的检测输出更连续（仅指本视频上的输出帧比例）。")
     if baseline["fast_detected_ratio"] != candidate["fast_detected_ratio"]:
-        winner = "Baseline" if baseline["fast_detected_ratio"] > candidate["fast_detected_ratio"] else "Candidate"
+        winner = baseline_name if baseline["fast_detected_ratio"] > candidate["fast_detected_ratio"] else candidate_name
         conclusion.append(f"- {winner} 在 fast 分组帧上输出更多。")
     if baseline["median_inference_ms"] != candidate["median_inference_ms"]:
-        winner = "Baseline" if (baseline["median_inference_ms"] or math.inf) < (candidate["median_inference_ms"] or math.inf) else "Candidate"
+        winner = baseline_name if (baseline["median_inference_ms"] or math.inf) < (candidate["median_inference_ms"] or math.inf) else candidate_name
         conclusion.append(f"- {winner} 的推理 P50 更短。")
     if baseline["longest_missing_run_frames"] != candidate["longest_missing_run_frames"]:
-        winner = "Baseline" if baseline["longest_missing_run_frames"] < candidate["longest_missing_run_frames"] else "Candidate"
+        winner = baseline_name if baseline["longest_missing_run_frames"] < candidate["longest_missing_run_frames"] else candidate_name
         conclusion.append(f"- {winner} 的最长连续无检测输出区间更短。")
     if not conclusion:
         conclusion.append("- 本次自动连续性指标未显示明确差异。")
@@ -748,6 +933,8 @@ def build_report(summary: dict[str, Any]) -> str:
 
 ## 模型与配置
 
+- 左侧名称：`{baseline_name}`
+- 右侧名称：`{candidate_name}`
 - Baseline 模型：`{summary['configs']['baseline']['model_path']}`
 - Candidate 模型：`{summary['configs']['candidate']['model_path']}`
 - Baseline 配置：`{summary['configs']['baseline_config_path']}`
@@ -763,9 +950,9 @@ motion_score 是相邻解码帧缩小为 64x36 灰度图后的平均绝对差，
 
 ## 模型指标
 
-{model_table('Baseline', baseline)}
+{model_table(baseline_name, baseline)}
 
-{model_table('Candidate', candidate)}
+{model_table(candidate_name, candidate)}
 
 center_x 标准差表示检测输出位置的离散程度，其中可能包含钢球真实运动，不能解释为位置误差。
 
@@ -777,18 +964,32 @@ center_x 标准差表示检测输出位置的离散程度，其中可能包含�
 - 双方均无输出：{comparison['neither_detected_frames']}（{fmt(comparison['neither_detected_ratio'])}）
 - 同时输出帧 center_x 差异均值 / P95：{fmt(comparison['mean_center_x_difference_px'])} / {fmt(comparison['p95_center_x_difference_px'])} px
 
+## 水管 ROI 指标
+
+- {candidate_name} ROI 有效 / 无效帧：{candidate['roi_geometry_valid_frames']} / {candidate['roi_geometry_invalid_frames']}
+- 原始 / 接受 / 拒绝框总数：{candidate['raw_detection_box_count']} / {candidate['roi_accepted_box_count']} / {candidate['roi_rejected_box_count']}
+- ROI 外检测输出比例：{fmt(candidate['roi_outside_output_ratio'])}
+- ROI 开启后最终有输出帧比例：{fmt(candidate['detected_frame_ratio'])}
+- static / slow / fast ROI 接受比例：{fmt(candidate['static_roi_accepted_ratio'])} / {fmt(candidate['slow_roi_accepted_ratio'])} / {fmt(candidate['fast_roi_accepted_ratio'])}
+- 水管几何失效且无最终输出帧：{candidate['geometry_invalid_no_output_frames']}
+- 置信度提高导致无输出的可归因帧：{comparison['confidence_threshold_removed_frames']}
+- 仅 ROI 过滤造成变化的可归因帧：{comparison['roi_only_changed_frames']}
+- Raw 最终中心位于 Candidate ROI 外的帧：{comparison['raw_reference_outside_roi_frames']}
+
+ROI 关闭侧的 geometry_valid 留空，accepted_count 按正式 Detector 的有效候选框数量记录，rejected_count 为 0。以上是输出与几何统计，不能解释为真实准确率提升。
+
 ## fast 阶段输出连续性
 
-- Baseline：{baseline['fast_detected_frames']} / {baseline['fast_frames']}（{fmt(baseline['fast_detected_ratio'])}）
-- Candidate：{candidate['fast_detected_frames']} / {candidate['fast_frames']}（{fmt(candidate['fast_detected_ratio'])}）
+- {baseline_name}：{baseline['fast_detected_frames']} / {baseline['fast_frames']}（{fmt(baseline['fast_detected_ratio'])}）
+- {candidate_name}：{candidate['fast_detected_frames']} / {candidate['fast_frames']}（{fmt(candidate['fast_detected_ratio'])}）
 
 ## 最长连续无检测输出区间（前 5 段）
 
 以下区间是连续无检测输出区间，不是在没有人工真值时确定的漏检结论。
 
-{runs('Baseline', baseline)}
+{runs(baseline_name, baseline)}
 
-{runs('Candidate', candidate)}
+{runs(candidate_name, candidate)}
 
 ## 标注视频
 
@@ -842,6 +1043,8 @@ def run_comparison(
     write_videos: bool = True,
     progress_every: int = 50,
     order: str = "baseline,candidate",
+    baseline_name: str = "baseline",
+    candidate_name: str = "candidate",
     detector_factory: Callable[[Any], Any] = SteelBallYoloNcnnDetector,
     writer_factory: Callable[..., Any] = cv2.VideoWriter,
 ) -> dict[str, Any]:
@@ -867,7 +1070,7 @@ def run_comparison(
     fair_candidate = {name: getattr(configs["candidate"], name) for name in FAIR_CONFIG_FIELDS}
     if fair_baseline != fair_candidate:
         raise ValueError(
-            "两份配置除 model_path/debug 外的推理参数必须一致: "
+            "两份配置的输入尺寸、IoU、max_det、线程和类别必须一致: "
             f"baseline={fair_baseline}, candidate={fair_candidate}"
         )
     labels = order.split(",")
@@ -926,6 +1129,10 @@ def run_comparison(
             destination,
             rows,
             frame_step=frame_step,
+            baseline_name=baseline_name,
+            candidate_name=candidate_name,
+            baseline_confidence=float(configs["baseline"].conf_threshold),
+            candidate_confidence=float(configs["candidate"].conf_threshold),
             writer_factory=writer_factory,
         )
     baseline_summary = model_summary(rows, "baseline", initial_info.fps)
@@ -933,6 +1140,7 @@ def run_comparison(
     duplicate_count = sum(bool(row["near_duplicate_frame"]) for row in rows)
     finished_wall = iso_now()
     summary = {
+        "names": {"baseline": baseline_name, "candidate": candidate_name},
         "input_video": {
             "path": str(video_path),
             "sha256": sha256_file(video_path),
@@ -968,6 +1176,8 @@ def run_comparison(
             "write_videos": write_videos,
             "progress_every": progress_every,
             "order": order,
+            "baseline_name": baseline_name,
+            "candidate_name": candidate_name,
         },
         "started_at": started_wall,
         "finished_at": finished_wall,
@@ -997,6 +1207,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--candidate-config", default="config/model_profiles/steel_ball_candidate.yaml"
     )
     parser.add_argument("--output-dir")
+    parser.add_argument("--baseline-name", default="baseline")
+    parser.add_argument("--candidate-name", default="candidate")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--frame-step", type=int, default=1)
     parser.add_argument("--max-frames", type=int, default=0)
@@ -1028,6 +1240,8 @@ def main(argv: list[str] | None = None) -> int:
             write_videos=args.write_videos,
             progress_every=args.progress_every,
             order=args.order,
+            baseline_name=args.baseline_name,
+            candidate_name=args.candidate_name,
         )
     except KeyboardInterrupt:
         print("用户中断；资源已释放，不生成正式 summary/report。", file=sys.stderr)

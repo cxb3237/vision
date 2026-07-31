@@ -146,8 +146,15 @@ def resolve_ball_uart_settings(args: argparse.Namespace, mission: dict[str, Any]
     }
 
 
-def create_detector(config_path: str | Path = "config/steel_ball_ncnn.yaml") -> SteelBallYoloNcnnDetector:
-    return SteelBallYoloNcnnDetector(load_steel_ball_ncnn_config(config_path))
+def create_detector(
+    config_path: str | Path = "config/steel_ball_ncnn.yaml",
+    *,
+    pipe_marker_detector: Any = None,
+) -> SteelBallYoloNcnnDetector:
+    return SteelBallYoloNcnnDetector(
+        load_steel_ball_ncnn_config(config_path),
+        pipe_marker_detector=pipe_marker_detector,
+    )
 
 
 def _handle_display(image: Any, detector: Any, result: Any) -> tuple[bool, Any]:
@@ -250,9 +257,11 @@ def main(argv: list[str] | None = None) -> int:
                     LOG.info("触摸模式已按配置自动启用比赛网站后端")
             except (CompetitionUIConfigError, ConfigError, OSError):
                 LOG.exception("比赛网站配置加载失败；视觉识别、UART和调试网页继续运行")
-        detector = create_detector(args.steel_ball_ncnn_config)
         pipe_mapping_config = load_pipe_mapping_config(args.pipe_mapping_config)
         pipe_marker_detector = PipeMarkerDetector(pipe_mapping_config)
+        detector = create_detector(args.steel_ball_ncnn_config)
+        if hasattr(detector, "pipe_marker_detector"):
+            detector.pipe_marker_detector = pipe_marker_detector
         camera = CameraService(camera_config)
         uart_settings = resolve_ball_uart_settings(args, mission)
         uart = BallUartClient(uart_settings.pop("port"), uart_settings.pop("baudrate"), **uart_settings)

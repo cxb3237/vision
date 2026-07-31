@@ -160,8 +160,20 @@ def load_steel_ball_ncnn_config(path: str | Path = "config/steel_ball_ncnn.yaml"
     data = _read(path)
     allowed = set(SteelBallNcnnConfig.__dataclass_fields__)
     _reject_unknown(data, allowed, "steel_ball_ncnn")
+    pipe_roi_data = data.get("pipe_roi", {})
+    if not isinstance(pipe_roi_data, dict):
+        raise ConfigError("steel_ball_ncnn.pipe_roi 必须是映射")
+    from core.pipe_corridor import PipeCorridorConfig
+
+    _reject_unknown(
+        pipe_roi_data,
+        set(PipeCorridorConfig.__dataclass_fields__),
+        "steel_ball_ncnn.pipe_roi",
+    )
     try:
-        config = SteelBallNcnnConfig(**data)
+        config = SteelBallNcnnConfig(
+            **{**data, "pipe_roi": PipeCorridorConfig(**pipe_roi_data)}
+        )
     except TypeError as exc:
         raise ConfigError(f"steel_ball_ncnn 字段无效: {exc}") from exc
     if config.backend != "ncnn":
@@ -184,6 +196,50 @@ def load_steel_ball_ncnn_config(path: str | Path = "config/steel_ball_ncnn.yaml"
         raise ConfigError("steel_ball_ncnn.target_class 必须为整数")
     if not isinstance(config.debug_tensor_shapes, bool):
         raise ConfigError("steel_ball_ncnn.debug_tensor_shapes 必须为布尔值")
+    roi = config.pipe_roi
+    for name in ("enabled", "require_valid_geometry", "debug_overlay"):
+        if not isinstance(getattr(roi, name), bool):
+            raise ConfigError(f"steel_ball_ncnn.pipe_roi.{name} 必须为布尔值")
+    if (
+        isinstance(roi.hold_last_valid_ms, bool)
+        or not isinstance(roi.hold_last_valid_ms, int)
+        or roi.hold_last_valid_ms < 0
+        or roi.hold_last_valid_ms > 60_000
+    ):
+        raise ConfigError("steel_ball_ncnn.pipe_roi.hold_last_valid_ms 必须在 0..60000 范围内")
+    ratio_value = roi.corridor_half_width_ratio
+    if (
+        isinstance(ratio_value, bool)
+        or not isinstance(ratio_value, (int, float))
+        or not math.isfinite(float(ratio_value))
+    ):
+        raise ConfigError(
+            "steel_ball_ncnn.pipe_roi.corridor_half_width_ratio 必须为有限数值"
+        )
+    for name in (
+        "minimum_axis_length_px",
+        "corridor_half_width_px",
+        "end_margin_px",
+    ):
+        value = getattr(roi, name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise ConfigError(f"steel_ball_ncnn.pipe_roi.{name} 必须为有限非负数")
+    if roi.minimum_axis_length_px <= 0.0:
+        raise ConfigError("steel_ball_ncnn.pipe_roi.minimum_axis_length_px 必须大于 0")
+    if (
+        roi.enabled
+        and roi.corridor_half_width_ratio <= 0.0
+        and roi.corridor_half_width_px <= 0.0
+    ):
+        raise ConfigError(
+            "ROI 启用时 pipe_roi.corridor_half_width_ratio 和 "
+            "corridor_half_width_px 至少一个必须大于 0"
+        )
     return config
 
 

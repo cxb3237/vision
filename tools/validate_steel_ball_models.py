@@ -18,10 +18,14 @@ from inference.steel_ball_ncnn_runtime import SteelBallNcnnRuntime
 PROFILE_PATHS = {
     "baseline": PROJECT_ROOT / "config/model_profiles/steel_ball_baseline.yaml",
     "candidate": PROJECT_ROOT / "config/model_profiles/steel_ball_candidate.yaml",
+    "candidate-roi": PROJECT_ROOT / "config/model_profiles/steel_ball_candidate_roi.yaml",
+    "candidate-roi-strict": PROJECT_ROOT / "config/model_profiles/steel_ball_candidate_roi_strict.yaml",
 }
 EXPECTED_MODEL_PATHS = {
     "baseline": PROJECT_ROOT / "models/steel_ball/best_ncnn_model",
     "candidate": PROJECT_ROOT / "models/steel_ball/candidate_ncnn_model",
+    "candidate-roi": PROJECT_ROOT / "models/steel_ball/candidate_ncnn_model",
+    "candidate-roi-strict": PROJECT_ROOT / "models/steel_ball/candidate_ncnn_model",
 }
 CORE_MODEL_FILES = (
     "model.ncnn.param",
@@ -147,7 +151,7 @@ def print_result(result: ValidationResult) -> None:
 def validate_models(*, load_runtime: bool = True) -> bool:
     results = [
         validate_profile(profile, load_runtime=load_runtime)
-        for profile in ("baseline", "candidate")
+        for profile in ("baseline", "candidate", "candidate-roi", "candidate-roi-strict")
     ]
     for result in results:
         print_result(result)

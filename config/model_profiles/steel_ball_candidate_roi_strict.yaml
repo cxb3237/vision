@@ -1,0 +1,19 @@
+backend: ncnn
+model_path: models/steel_ball/candidate_ncnn_model
+imgsz: 416
+conf_threshold: 0.50
+iou_threshold: 0.60
+max_det: 30
+num_threads: 4
+target_class: 100
+debug_tensor_shapes: false
+pipe_roi:
+  enabled: true
+  require_valid_geometry: true
+  hold_last_valid_ms: 250
+  minimum_axis_length_px: 100
+  # 10 mm outer radius / 250 mm marker-to-marker physical span (pending hardware confirmation).
+  corridor_half_width_ratio: 0.04
+  corridor_half_width_px: 0
+  end_margin_px: 15
+  debug_overlay: false

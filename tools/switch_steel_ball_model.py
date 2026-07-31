@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import datetime
 import os
 from pathlib import Path
@@ -34,8 +35,10 @@ RESTART_COMMAND = "sudo systemctl restart vision-touch.service"
 def active_profile() -> tuple[str, Path]:
     config = load_steel_ball_ncnn_config(ACTIVE_CONFIG)
     model_path = Path(config.model_path).resolve()
-    for profile, expected_path in EXPECTED_MODEL_PATHS.items():
-        if model_path == expected_path.resolve():
+    active_values = asdict(config)
+    for profile, profile_path in PROFILE_PATHS.items():
+        profile_config = load_steel_ball_ncnn_config(profile_path)
+        if active_values == asdict(profile_config):
             return profile, model_path
     return "custom", model_path
 
@@ -89,7 +92,7 @@ def atomic_activate(profile: str) -> int:
         return 1
 
     print(f"配置备份: {backup}")
-    if profile == "candidate":
+    if profile in {"candidate", "candidate-roi", "candidate-roi-strict"}:
         print("警告：当前已切换到候选模型，请仅用于受控 A/B 验证。")
     else:
         print("当前已切换到 baseline 模型。")
@@ -101,7 +104,15 @@ def atomic_activate(profile: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("status", "baseline", "candidate", "validate")
+        "command",
+        choices=(
+            "status",
+            "baseline",
+            "candidate",
+            "candidate-roi",
+            "candidate-roi-strict",
+            "validate",
+        ),
     )
     return parser
 

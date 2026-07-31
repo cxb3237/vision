@@ -57,6 +57,39 @@ class FakeDetector:
         self.closed = True
 
 
+class RoiFakeDetector(FakeDetector):
+    def get_runtime_status(self):
+        status = super().get_runtime_status()
+        status.update(
+            {
+                "pipe_roi_enabled": True,
+                "raw_detection_count": 2,
+                "roi_geometry_valid": True,
+                "roi_accepted_count": 1,
+                "roi_rejected_count": 1,
+                "selected_after_roi": True,
+                "pipe_roi_last_reason": "accepted",
+            }
+        )
+        return status
+
+    def get_roi_debug_snapshot(self):
+        return {
+            "enabled": True,
+            "geometry_valid": True,
+            "axis": {"left": [5, 32], "right": [90, 32], "length_px": 85},
+            "corridor_half_width_px": 10,
+            "minimum_axis_length_px": 20,
+            "end_margin_px": 5,
+            "conf_threshold": 0.50,
+            "raw_detections": [{"x1": 10, "y1": 20, "x2": 30, "y2": 40, "center_x": 20, "center_y": 30, "confidence": 0.45}],
+            "accepted_detections": [{"x1": 10, "y1": 20, "x2": 30, "y2": 40, "center_x": 20, "center_y": 30, "confidence": 0.45}],
+            "rejected_detections": [{"x1": 60, "y1": 50, "x2": 75, "y2": 63, "center_x": 68, "center_y": 57, "confidence": 0.8}],
+            "selected": None,
+            "reason": "accepted",
+        }
+
+
 def write_config(path: Path, model_name: str) -> None:
     model_dir = path.parent / model_name
     model_dir.mkdir()
@@ -275,3 +308,44 @@ def test_keyboard_interrupt_preserves_partial_csv(comparison_inputs, tmp_path: P
         )
     with partial.open(encoding="utf-8-sig", newline="") as stream:
         assert [int(row["frame_index"]) for row in csv.DictReader(stream)] == [0, 1]
+
+
+def test_custom_model_names_and_roi_fields_are_reported(comparison_inputs, tmp_path: Path) -> None:
+    video, baseline, candidate = comparison_inputs
+    output = tmp_path / "named"
+    summary = run_comparison(
+        video,
+        baseline,
+        candidate,
+        output,
+        warmup=0,
+        max_frames=2,
+        write_videos=False,
+        progress_every=0,
+        baseline_name="candidate_raw",
+        candidate_name="candidate_roi",
+        detector_factory=RoiFakeDetector,
+    )
+    assert summary["names"] == {"baseline": "candidate_raw", "candidate": "candidate_roi"}
+    report = (output / "report.md").read_text(encoding="utf-8")
+    assert "candidate_raw" in report and "candidate_roi" in report
+    with (output / "frames.csv").open(encoding="utf-8-sig", newline="") as stream:
+        row = next(csv.DictReader(stream))
+    assert row["candidate_raw_detection_count"] == "2"
+    assert row["candidate_roi_rejected_count"] == "1"
+
+
+def test_roi_debug_video_overlay_does_not_crash(comparison_inputs, tmp_path: Path) -> None:
+    video, baseline, candidate = comparison_inputs
+    summary = run_comparison(
+        video,
+        baseline,
+        candidate,
+        tmp_path / "roi_video",
+        warmup=0,
+        max_frames=2,
+        write_videos=True,
+        progress_every=0,
+        detector_factory=RoiFakeDetector,
+    )
+    assert len(summary["video_outputs"]) == 3

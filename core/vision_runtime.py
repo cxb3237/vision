@@ -485,7 +485,13 @@ class VisionRuntime:
                 self._last_frame_id = frame.frame_id
                 result = self.tracker.update(self.detector.process(frame))
                 marker_a = marker_b = None
-                if self.pipe_marker_detector is not None:
+                detector_markers = getattr(self.detector, "get_pipe_markers", None)
+                roi_enabled = bool(
+                    self.detector.get_runtime_status().get("pipe_roi_enabled", False)
+                )
+                if roi_enabled and callable(detector_markers):
+                    marker_a, marker_b = detector_markers()
+                elif self.pipe_marker_detector is not None:
                     marker_a, marker_b = self.pipe_marker_detector.detect(frame.image)
                 result.marker_a_x = marker_a[0] if marker_a is not None else None
                 result.marker_a_y = marker_a[1] if marker_a is not None else None

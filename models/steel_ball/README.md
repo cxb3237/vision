@@ -28,3 +28,12 @@ python tools/switch_steel_ball_model.py baseline
 ```
 
 切换工具只原子替换配置并把旧配置备份到 `runtime_backups/`，不会修改模型或重启服务。测试结束后必须执行 `baseline` 恢复正式模型。
+
+## 三套配置档案
+
+- `config/model_profiles/steel_ball_baseline.yaml` → `best_ncnn_model/`，conf=0.40，ROI 关闭。
+- `config/model_profiles/steel_ball_candidate.yaml` → `candidate_ncnn_model/`，conf=0.40，ROI 关闭，作为 Candidate Raw 对照。
+- `config/model_profiles/steel_ball_candidate_roi.yaml` → 同一 `candidate_ncnn_model/`，conf=0.40，启用动态比例红蓝端点水管走廊过滤。
+- `config/model_profiles/steel_ball_candidate_roi_strict.yaml` → 同一 `candidate_ncnn_model/` 和相同 ROI，仅 conf=0.50。
+
+Candidate ROI 的 `corridor_half_width_ratio=0.04` 按每帧当前轴长计算实际半宽；该比例来自约 10 mm 外半径 / 约 250 mm 标记跨度，项目资料尚不能独立确认，待硬件确认。四套 profile 都不修改任何 NCNN 模型、解码、NMS 或 letterbox 数学逻辑。

@@ -12,7 +12,7 @@ Point = tuple[int, int]
 
 
 class PipeMarkerDetector:
-    """Detect the blue A marker and green B marker in one BGR frame."""
+    """Detect the right/blue A marker and left/red B marker in one BGR frame."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.enabled = bool(config["enabled"])

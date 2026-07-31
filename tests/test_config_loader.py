@@ -39,3 +39,36 @@ def test_invalid_uart_calibration_or_rate_is_rejected(tmp_path: Path, name: str,
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(ConfigError, match="ball_uart"):
         load_mission_config(path)
+
+
+def test_steel_ball_old_config_defaults_pipe_roi_disabled() -> None:
+    config = load_steel_ball_ncnn_config("config/model_profiles/steel_ball_candidate.yaml")
+    assert config.pipe_roi.enabled is False
+    assert config.pipe_roi.corridor_half_width_px == 0.0
+    assert config.pipe_roi.corridor_half_width_ratio == 0.0
+
+
+def test_steel_ball_pipe_roi_rejects_unknown_or_invalid_fields(tmp_path: Path) -> None:
+    data = yaml.safe_load(Path("config/model_profiles/steel_ball_candidate.yaml").read_text(encoding="utf-8"))
+    data["pipe_roi"] = {"enabled": True, "corridor_half_width_px": 0}
+    path = tmp_path / "roi.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ConfigError, match="corridor_half_width_px"):
+        load_steel_ball_ncnn_config(path)
+    data["pipe_roi"] = {"enabled": False, "unknown": 1}
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ConfigError, match="unknown"):
+        load_steel_ball_ncnn_config(path)
+
+
+def test_steel_ball_pipe_roi_accepts_ratio_without_fixed_width(tmp_path: Path) -> None:
+    data = yaml.safe_load(Path("config/model_profiles/steel_ball_candidate.yaml").read_text(encoding="utf-8"))
+    data["pipe_roi"] = {
+        "enabled": True,
+        "corridor_half_width_ratio": 0.04,
+        "corridor_half_width_px": 0,
+    }
+    path = tmp_path / "ratio.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    config = load_steel_ball_ncnn_config(path)
+    assert config.pipe_roi.corridor_half_width_ratio == pytest.approx(0.04)

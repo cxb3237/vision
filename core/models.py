@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
 import numpy as np
+
+from core.pipe_corridor import PipeCorridorConfig
 
 
 class TargetState(IntEnum):
@@ -99,3 +101,4 @@ class SteelBallNcnnConfig:
     num_threads: int = 4
     target_class: int = 100
     debug_tensor_shapes: bool = False
+    pipe_roi: PipeCorridorConfig = field(default_factory=PipeCorridorConfig)
