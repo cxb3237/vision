@@ -13,6 +13,7 @@ from typing import Any, Callable
 from competition_ui.media_service import CompetitionMediaService
 from competition_ui.models import CompetitionUIConfig
 
+from core.ball_position_estimator import BallPositionEstimator, BallPositionEstimatorConfig
 from core.models import CameraConfig, VisionResult
 from core.performance_metrics import RollingRate, RollingSamples
 from detectors.pipe_marker_detector import compute_ball_position_mm
@@ -87,6 +88,12 @@ class VisionRuntime:
         self.detector = detector
         self.camera_service = camera_service
         self.ball_uart = ball_uart
+        estimator_profile = mission.get("ball_uart", {}).get("position_estimator", {})
+        self.position_estimator = BallPositionEstimator(
+            BallPositionEstimatorConfig(**estimator_profile)
+        )
+        if hasattr(self.ball_uart, "set_output_provider"):
+            self.ball_uart.set_output_provider(self.position_estimator.sample_output)
         self.tracker = tracker
         self.display_handler = display_handler
         self.pipe_marker_detector = pipe_marker_detector
@@ -155,6 +162,14 @@ class VisionRuntime:
                 "position_tx_hz": 0.0,
                 "invalid_tx_count": 0,
                 "invalid_tx_hz": 0.0,
+                **self.position_estimator.get_status(),
+                "uart_output_tx_hz": 0.0,
+                "uart_output_period_ms": 20.0,
+                "uart_worst_case_frame_bytes": 15,
+                "uart_estimated_tx_utilization": 0.78125,
+                "uart_tx_deadline_miss_count": 0,
+                "uart_tx_jitter_ms": 0.0,
+                "uart_tx_jitter_p95_ms": 0.0,
                 "competition_mode": competition,
                 "vision_output_enabled": competition,
                 "runtime_modified": False,
@@ -240,7 +255,10 @@ class VisionRuntime:
                 self.detector.initialize()
                 self.camera_service.start()
                 self._camera_started = True
+                if hasattr(self.ball_uart, "set_output_provider"):
+                    self.ball_uart.set_output_provider(self.position_estimator.sample_output)
                 if self.state_store.snapshot()["competition_mode"]:
+                    self.position_estimator.reset()
                     self.ball_uart.discard_pending_ball_position()
                     self.ball_uart.send_start()
                 self.ball_uart.start()
@@ -282,6 +300,8 @@ class VisionRuntime:
             self.frame_stream.stop()
             self._preview_started = False
         if self._uart_started:
+            if hasattr(self.ball_uart, "clear_output_provider"):
+                self.ball_uart.clear_output_provider()
             self.ball_uart.close()
             self._uart_started = False
         if self._camera_started:
@@ -375,11 +395,13 @@ class VisionRuntime:
             if not calibration.get("ball_position_calibrated", False):
                 reason = calibration.get("ball_position_calibration_error") or "位置尚未标定"
                 raise RuntimeError(f"未标定，禁止启用位置下发：{reason}")
+            self.position_estimator.reset()
             self.ball_uart.discard_pending_ball_position()
             self.state_store.update(competition_mode=True, vision_output_enabled=True)
             self.ball_uart.send_start()
             LOG.info("比赛模式位置输出已启用")
         else:
+            self.position_estimator.reset()
             self.state_store.update(competition_mode=False, vision_output_enabled=False)
             self.ball_uart.discard_pending_ball_position()
             self.ball_uart.send_stop()
@@ -462,6 +484,14 @@ class VisionRuntime:
             position_tx_hz=float(uart.get("position_tx_hz", 0.0)),
             invalid_tx_count=int(uart.get("invalid_tx_count", 0)),
             invalid_tx_hz=float(uart.get("invalid_tx_hz", 0.0)),
+            uart_output_tx_hz=float(uart.get("uart_output_tx_hz", 0.0)),
+            uart_output_period_ms=float(uart.get("uart_output_period_ms", 0.0)),
+            uart_worst_case_frame_bytes=int(uart.get("uart_worst_case_frame_bytes", 0)),
+            uart_estimated_tx_utilization=float(uart.get("uart_estimated_tx_utilization", 0.0)),
+            uart_tx_deadline_miss_count=int(uart.get("uart_tx_deadline_miss_count", 0)),
+            uart_tx_jitter_ms=float(uart.get("uart_tx_jitter_ms", 0.0)),
+            uart_tx_jitter_p95_ms=float(uart.get("uart_tx_jitter_p95_ms", 0.0)),
+            **self.position_estimator.get_status(),
             preview_fps=float(preview.get("preview_fps", 0.0)),
             preview_overwritten_count=int(preview.get("preview_overwritten_count", 0)),
             **self._detector_status(),
@@ -522,13 +552,23 @@ class VisionRuntime:
                         calibration["ball_position_calibrated"] = False
                         calibration["ball_position_calibration_error"] = str(exc)
                 competition = bool(self.state_store.snapshot().get("competition_mode"))
-                if competition:
-                    if x_mm is None:
-                        self.ball_uart.send_invalid()
-                    else:
-                        self.ball_uart.publish_ball_position(int(round(x_mm)))
-                else:
-                    self.ball_uart.discard_pending_ball_position()
+                if competition and x_mm is not None:
+                    detector_status = self._detector_status()
+                    roi_valid = (
+                        bool(detector_status.get("pipe_roi_geometry_valid"))
+                        if detector_status.get("pipe_roi_enabled")
+                        else True
+                    )
+                    confidence = max(
+                        0.0,
+                        min(1.0, float(result.confidence) / 1000.0),
+                    )
+                    self.position_estimator.update_measurement(
+                        x_mm,
+                        frame.capture_timestamp,
+                        confidence=confidence,
+                        roi_valid=roi_valid,
+                    )
                 summary = self._capture_to_result.summary()
                 processed = int(self.state_store.snapshot().get("vision_processed_count", 0)) + 1
                 self.state_store.update(

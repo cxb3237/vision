@@ -2,6 +2,8 @@
 
 本工程只服务于车载平衡滚球系统：树莓派 5 从一个摄像头采集画面，使用部署好的 YOLO-NCNN 模型检测钢球，把横向像素坐标线性映射到 `-125..125 mm`，再通过 UART2 向 MSPM0 发送 ASCII 命令。本地网页显示实时标注、位置、帧率、UART/MCU 状态，并提供必要的摄像头参数和位置下发启停操作。
 
+正式现场方案使用 Candidate ROI Strict：Candidate NCNN、`conf_threshold=0.50`、左红右蓝端点和水管 ROI。视觉帧只更新一维 α-β 位置/速度估计器；唯一的 `BallUartClient` worker 以绝对 20 ms deadline 固定采样并输出。短时无测量依次进入 PREDICTED、HELD，超过 300 ms 进入 LOST 并发送 `BALL INVALID`。协议仍为 9600 baud、8N1 和原有 ASCII 命令。完整状态规则、调参和验收流程见 [docs/BALL_POSITION_ESTIMATOR.md](docs/BALL_POSITION_ESTIMATOR.md)。
+
 ## 运行架构
 
 ```text
@@ -9,7 +11,8 @@ CameraService (latest frame)
   -> SteelBallYoloNcnnDetector
   -> TargetTracker
   -> pixel X -> -125..125 mm
-  -> BallUartClient (latest-only)
+  -> BallPositionEstimator (measurement updates)
+  -> BallUartClient (fixed 50 Hz estimator sampling)
   -> MSPM0
 
 VisionRuntime -> 127.0.0.1:8765（原有状态、画面与控制 API）

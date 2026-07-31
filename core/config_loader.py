@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from core.ball_position_estimator import BallPositionEstimatorConfig
 from core.models import CameraConfig, SteelBallNcnnConfig
 
 
@@ -99,10 +100,11 @@ def load_mission_config(path: str | Path = "config/mission.yaml", overrides: dic
         "enabled": True,
         "port": "/dev/ttyAMA0",
         "baudrate": 9600,
-        "timeout_s": 0.02,
+        "timeout_s": 0.005,
         "write_timeout_s": 0.05,
         "reconnect_interval_s": 1.0,
         "send_rate_hz": 50.0,
+        "continuous_output": True,
         "line_ending": "\r\n",
         "wait_ready": False,
         "debug_position_interval_s": 1.0,
@@ -111,11 +113,12 @@ def load_mission_config(path: str | Path = "config/mission.yaml", overrides: dic
         "left_endpoint_px": 72,
         "right_endpoint_px": 568,
         "servo_side": "right",
+        "position_estimator": {},
     }
     _reject_unknown(profile, set(defaults), "mission.ball_uart")
     for name, value in defaults.items():
         profile.setdefault(name, value)
-    for name in ("enabled", "wait_ready", "calibrated"):
+    for name in ("enabled", "wait_ready", "calibrated", "continuous_output"):
         if not isinstance(profile[name], bool):
             raise ConfigError(f"mission.ball_uart.{name} 必须为布尔值")
     if profile["wait_ready"]:
@@ -136,6 +139,60 @@ def load_mission_config(path: str | Path = "config/mission.yaml", overrides: dic
         raise ConfigError("mission.ball_uart.servo_side 必须为字符串")
     if profile["line_ending"] != "\r\n":
         raise ConfigError("mission.ball_uart.line_ending 必须为 CRLF")
+    if profile["baudrate"] != 9600:
+        raise ConfigError("mission.ball_uart.baudrate must remain 9600")
+    worst_case_frame_bytes = max(
+        len(f"BALL POS {position}\r\n".encode("ascii"))
+        for position in (-125, 125)
+    )
+    utilization = worst_case_frame_bytes * 10.0 * float(profile["send_rate_hz"]) / float(profile["baudrate"])
+    if utilization > 0.85:
+        raise ConfigError(f"mission.ball_uart worst-case TX utilization exceeds 85%: {utilization:.3f}")
+
+    estimator_data = profile["position_estimator"]
+    if not isinstance(estimator_data, dict):
+        raise ConfigError("mission.ball_uart.position_estimator must be a mapping")
+    estimator_defaults = {
+        name: field.default
+        for name, field in BallPositionEstimatorConfig.__dataclass_fields__.items()
+    }
+    _reject_unknown(estimator_data, set(estimator_defaults), "mission.ball_uart.position_estimator")
+    for name, value in estimator_defaults.items():
+        estimator_data.setdefault(name, value)
+    for name in ("enabled", "measurement_gate_enabled"):
+        if not isinstance(estimator_data[name], bool):
+            raise ConfigError(f"position_estimator.{name} must be boolean")
+    numeric_fields = set(estimator_defaults) - {
+        "enabled", "measurement_gate_enabled", "measurement_reacquire_confirmations",
+    }
+    for name in numeric_fields:
+        value = estimator_data[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ConfigError(f"position_estimator.{name} must be finite numeric")
+    if not 0.0 < float(estimator_data["alpha"]) <= 1.0:
+        raise ConfigError("position_estimator.alpha must be in (0, 1]")
+    if not 0.0 <= float(estimator_data["beta"]) <= 1.0:
+        raise ConfigError("position_estimator.beta must be in [0, 1]")
+    if not (
+        0.0 < float(estimator_data["measurement_fresh_ms"])
+        < float(estimator_data["prediction_horizon_ms"])
+        < float(estimator_data["hold_horizon_ms"])
+    ):
+        raise ConfigError("position_estimator must satisfy fresh < prediction < hold")
+    for name in (
+        "velocity_decay_tau_ms", "max_speed_mm_s", "max_output_slew_mm_s",
+        "minimum_measurement_dt_ms", "maximum_measurement_dt_ms",
+        "measurement_gate_base_mm", "measurement_gate_speed_factor",
+    ):
+        if float(estimator_data[name]) <= 0.0:
+            raise ConfigError(f"position_estimator.{name} must be positive")
+    if float(estimator_data["minimum_measurement_dt_ms"]) >= float(estimator_data["maximum_measurement_dt_ms"]):
+        raise ConfigError("position_estimator minimum dt must be less than maximum dt")
+    if float(estimator_data["position_min_mm"]) != -125.0 or float(estimator_data["position_max_mm"]) != 125.0:
+        raise ConfigError("position_estimator range must remain -125..125 mm")
+    confirmations = estimator_data["measurement_reacquire_confirmations"]
+    if isinstance(confirmations, bool) or not isinstance(confirmations, int) or confirmations < 2:
+        raise ConfigError("position_estimator.measurement_reacquire_confirmations must be >= 2")
     for name, value in runtime_defaults.items():
         data.setdefault(name, value)
     for name in ("confirm_frames", "lost_frames"):

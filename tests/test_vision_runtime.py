@@ -72,12 +72,19 @@ class FakeUart:
         self.discards = 0
         self.starts = 0
         self.stops = 0
+        self.output_provider = None
 
     def start(self):
         pass
 
     def close(self):
         pass
+
+    def set_output_provider(self, provider):
+        self.output_provider = provider
+
+    def clear_output_provider(self):
+        self.output_provider = None
 
     def send_start(self):
         self.starts += 1
@@ -146,19 +153,22 @@ def test_debug_mode_detects_and_updates_web_but_does_not_send() -> None:
     assert status["vision_output_enabled"] is False
 
 
-def test_competition_mode_sends_only_ascii_position_submission() -> None:
+def test_competition_mode_updates_estimator_without_direct_uart_submission() -> None:
     runtime = make_runtime(True)
     run_one_frame(runtime)
-    assert runtime.ball_uart.positions == [0]
+    assert runtime.ball_uart.positions == []
+    assert runtime.ball_uart.invalid == 0
+    assert runtime.get_status_snapshot()["position_measurement_count"] == 1
     assert runtime.get_status_snapshot()["vision_output_enabled"] is True
 
 
-def test_uncalibrated_competition_mode_sends_invalid_not_position() -> None:
+def test_uncalibrated_competition_mode_leaves_estimator_uninitialized() -> None:
     runtime = make_runtime(True, calibrated=False)
     run_one_frame(runtime)
     status = runtime.get_status_snapshot()
     assert runtime.ball_uart.positions == []
-    assert runtime.ball_uart.invalid == 1
+    assert runtime.ball_uart.invalid == 0
+    assert status["position_estimator_state"] == "UNINITIALIZED"
     assert status["ball_position_calibrated"] is False
     assert "未标定" in status["ball_position_calibration_error"]
 
@@ -166,7 +176,9 @@ def test_uncalibrated_competition_mode_sends_invalid_not_position() -> None:
 def test_valid_calibration_allows_position() -> None:
     runtime = make_runtime(True, calibrated=True)
     run_one_frame(runtime)
-    assert runtime.ball_uart.positions == [0]
+    assert runtime.ball_uart.positions == []
+    assert runtime.get_status_snapshot()["position_measurement_mm"] == 0
+    assert runtime.position_estimator.last_measurement_timestamp == runtime.camera_service.frame.capture_timestamp
 
 
 def test_enter_competition_is_rejected_when_position_is_uncalibrated() -> None:
@@ -221,10 +233,32 @@ def test_camera_online_uses_recent_frame_age_and_recovers() -> None:
 
 def test_exiting_competition_discards_pending_and_stops_future_output() -> None:
     runtime = make_runtime(True)
+    runtime.position_estimator.update_measurement(10.0, time.monotonic())
     runtime._set_competition(False)
     assert runtime.ball_uart.discards >= 1
     assert runtime.ball_uart.stops == 1
     assert runtime.get_status_snapshot()["competition_mode"] is False
+    assert runtime.position_estimator.get_status()["position_estimator_state"] == "UNINITIALIZED"
+
+
+def test_entering_competition_resets_to_invalid_until_first_measurement() -> None:
+    runtime = make_runtime(False)
+    runtime.position_estimator.update_measurement(10.0, time.monotonic())
+    runtime._set_competition(True)
+    sample = runtime.position_estimator.sample_output(time.monotonic())
+    assert sample.output_mm is None
+    assert sample.output_source == "INVALID"
+
+
+def test_no_new_frame_lets_estimator_age_to_lost_without_direct_invalid() -> None:
+    runtime = make_runtime(True)
+    captured = runtime.camera_service.frame.capture_timestamp
+    runtime.position_estimator.update_measurement(0.0, captured)
+    predicted = runtime.position_estimator.sample_output(captured + 0.10)
+    lost = runtime.position_estimator.sample_output(captured + 0.50)
+    assert predicted.output_source == "PREDICTED"
+    assert lost.output_source == "INVALID"
+    assert runtime.ball_uart.invalid == 0
 
 
 def test_enter_then_immediate_exit_leaves_only_stop_for_mcu() -> None:

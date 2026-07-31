@@ -81,6 +81,21 @@
             <h2>MCU详细字段</h2>
             <dl id="mcuFields" class="mcu-grid"></dl>
           </section>
+          <section class="dock-section" aria-label="position estimator diagnostics">
+            <h2>Position estimator</h2>
+            <dl class="telemetry-lines">
+              <div><dt>Estimator state</dt><dd id="estimatorState">UNINITIALIZED</dd></div>
+              <div><dt>Measured position</dt><dd id="estimatorMeasured">--</dd></div>
+              <div><dt>Estimated position</dt><dd id="estimatorEstimate">--</dd></div>
+              <div><dt>UART output position</dt><dd id="estimatorOutput">--</dd></div>
+              <div><dt>Velocity</dt><dd id="estimatorVelocity">0.0 mm/s</dd></div>
+              <div><dt>Measurement age</dt><dd id="estimatorAge">--</dd></div>
+              <div><dt>UART output Hz</dt><dd id="uartOutputHz">0.0 Hz</dd></div>
+              <div><dt>UART jitter P95</dt><dd id="uartJitterP95">0.0 ms</dd></div>
+              <div><dt>ROI valid</dt><dd id="estimatorRoiValid">--</dd></div>
+              <div><dt>Output source</dt><dd id="estimatorSource">INVALID</dd></div>
+            </dl>
+          </section>
           <dl id="steelBallStatus" class="telemetry-lines">
             <div><dt>识别后端</dt><dd id="steelBallBackend">—</dd></div>
             <div><dt>模型</dt><dd id="steelBallModel">—</dd></div>

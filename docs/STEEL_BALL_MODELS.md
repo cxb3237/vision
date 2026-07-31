@@ -4,6 +4,12 @@
 
 正式 baseline 与待评估 candidate 分目录保存，避免覆盖已验证权重，也让测试结果、模型来源和回退路径都可追踪。当前正式配置始终是 `config/steel_ball_ncnn.yaml`；profile 是可复用快照。
 
+## 正式现场推荐与连续输出
+
+现场推荐 profile 为 `steel_ball_candidate_roi_strict.yaml`：Candidate 模型、`conf_threshold=0.50`、ROI 开启。管道必须贴左红、右蓝端点标记，背景应避免大面积相似红蓝色。ROI 几何短时失效时不回退到整幅图任意检测框，位置估计器只在 300 ms 上限内预测/衰减保持；长期无可靠几何或钢球测量时输出 `BALL INVALID`。
+
+50 Hz UART 输出不改变模型、NMS 或 ROI 几何。视觉线程用 `FramePacket.capture_timestamp` 更新连续估计器，串口唯一 worker 独立按 20 ms 周期采样。详见 [BALL_POSITION_ESTIMATOR.md](BALL_POSITION_ESTIMATOR.md)。
+
 ## 公平 A/B 测试
 
 第一轮只允许改变 `model_path`。两份 profile 的 `imgsz`、`conf_threshold`、`iou_threshold`、`max_det`、`num_threads`、`target_class` 完全一致；任务层的 `confirm_frames`、`lost_frames`、`smoothing_alpha` 也不得随模型一起调整。使用相同视频、光照、摄像头参数和统计窗口比较：

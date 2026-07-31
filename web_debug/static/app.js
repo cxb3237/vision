@@ -178,6 +178,17 @@ function renderStatus(status) {
   text("mcuReadyState", status.mcu_ready ? "是" : "否");
   text("positionTxRate", `${positionTxHz.toFixed(1)} Hz`);
   text("invalidTxRate", `${invalidTxHz.toFixed(1)} Hz`);
+  const mmText = (value) => value === null || value === undefined ? "--" : `${Number(value).toFixed(1)} mm`;
+  text("estimatorState", status.position_estimator_state || "UNINITIALIZED");
+  text("estimatorMeasured", mmText(status.position_measurement_mm));
+  text("estimatorEstimate", mmText(status.position_estimate_mm));
+  text("estimatorOutput", mmText(status.position_output_mm));
+  text("estimatorVelocity", `${Number(status.position_velocity_mm_s || 0).toFixed(1)} mm/s`);
+  text("estimatorAge", status.position_measurement_age_ms === null || status.position_measurement_age_ms === undefined ? "--" : `${Number(status.position_measurement_age_ms).toFixed(1)} ms`);
+  text("uartOutputHz", `${Number(status.uart_output_tx_hz || 0).toFixed(1)} Hz`);
+  text("uartJitterP95", `${Number(status.uart_tx_jitter_p95_ms || 0).toFixed(2)} ms`);
+  text("estimatorRoiValid", status.pipe_roi_geometry_valid === null || status.pipe_roi_geometry_valid === undefined ? "--" : (status.pipe_roi_geometry_valid ? "yes" : "no"));
+  text("estimatorSource", status.position_output_source || "INVALID");
   const mcuFields = status.mcu_status || {};
   const mcuContainer = $("mcuFields");
   mcuContainer.replaceChildren();

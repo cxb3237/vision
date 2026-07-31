@@ -5,11 +5,12 @@ ball_uart:
   enabled: true
   port: /dev/ttyAMA0
   baudrate: 9600
-  timeout_s: 0.02
+  timeout_s: 0.005
   write_timeout_s: 0.05
   reconnect_interval_s: 1.0
-  # Maximum UART send rate; actual position updates are limited by valid vision frames.
+  # Fixed UART output cadence, independently sampled from the vision frame rate.
   send_rate_hz: 50
+  continuous_output: true
   line_ending: "\r\n"
   # No-handshake mode: an open UART is immediately available for START/POS/INVALID.
   wait_ready: false
@@ -19,3 +20,21 @@ ball_uart:
   left_endpoint_px: 72
   right_endpoint_px: 568
   servo_side: right
+  position_estimator:
+    enabled: true
+    alpha: 0.85
+    beta: 0.08
+    measurement_fresh_ms: 90
+    prediction_horizon_ms: 150
+    hold_horizon_ms: 300
+    velocity_decay_tau_ms: 120
+    max_speed_mm_s: 600
+    max_output_slew_mm_s: 600
+    minimum_measurement_dt_ms: 5
+    maximum_measurement_dt_ms: 500
+    position_min_mm: -125
+    position_max_mm: 125
+    measurement_gate_enabled: true
+    measurement_gate_base_mm: 20
+    measurement_gate_speed_factor: 1.5
+    measurement_reacquire_confirmations: 2

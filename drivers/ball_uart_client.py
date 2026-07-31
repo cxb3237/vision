@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from core.performance_metrics import RollingRate
+from core.performance_metrics import RollingRate, RollingSamples
 
 
 LOG = logging.getLogger(__name__)
@@ -19,6 +19,18 @@ READY_LINE = "READY BALL UART2 9600"
 STATUS_FIELDS = frozenset({"S", "F", "EN", "X", "V", "E", "RQ", "AP", "PW", "AGE", "ST", "AC", "RJ"})
 START_COMMAND = b"BALL START\r\n"
 STOP_COMMAND = b"BALL STOP\r\n"
+
+
+def worst_case_position_frame_bytes() -> int:
+    """Return the actual maximum encoded position-frame length."""
+
+    return max(len(encode_position(position)) for position in (-125, 125))
+
+
+def estimated_tx_utilization(baudrate: int, send_rate_hz: float) -> float:
+    """Calculate 8N1 wire utilization for worst-case position output."""
+
+    return worst_case_position_frame_bytes() * 10.0 * float(send_rate_hz) / int(baudrate)
 
 
 class BallUartState(str, Enum):
@@ -91,10 +103,11 @@ class BallUartClient:
         baudrate: int = 9600,
         *,
         enabled: bool = True,
-        timeout_s: float = 0.02,
+        timeout_s: float = 0.005,
         write_timeout_s: float = 0.05,
         reconnect_interval_s: float = 1.0,
         send_rate_hz: float = 50.0,
+        continuous_output: bool = False,
         debug_position_interval_s: float = 1.0,
         statistics_interval_s: float = 1.0,
         debug: bool = False,
@@ -117,6 +130,7 @@ class BallUartClient:
         self.timeout_s, self.write_timeout_s = float(timeout_s), float(write_timeout_s)
         self.reconnect_interval_s = float(reconnect_interval_s)
         self.send_rate_hz = float(send_rate_hz)
+        self.continuous_output = bool(continuous_output)
         self.debug_position_interval_s = float(debug_position_interval_s)
         self.statistics_interval_s = float(statistics_interval_s)
         self.debug = bool(debug)
@@ -130,6 +144,7 @@ class BallUartClient:
         self._outbound_lock = threading.Lock()
         self._control: deque[bytes] = deque()
         self._latest_position: tuple[int | None, bytes] | None = None
+        self._output_provider: Callable[[float], Any] | None = None
         self._stop_event = threading.Event()
         self._stop_sent = threading.Event()
         self._thread: threading.Thread | None = None
@@ -160,6 +175,13 @@ class BallUartClient:
         self._last_invalid_debug_at = 0.0
         self._position_tx_rate = RollingRate(window_seconds=2.0, max_events=256)
         self._invalid_tx_rate = RollingRate(window_seconds=2.0, max_events=256)
+        self._output_tx_rate = RollingRate(window_seconds=2.0, max_events=256)
+        self._tx_jitter = RollingSamples(max_samples=512)
+        self._output_tx_count = 0
+        self._tx_deadline_miss_count = 0
+        self._last_tx_jitter_ms = 0.0
+        self._scheduled_output_pending = False
+        self._provider_error_count = 0
 
     def pixel_x_to_mm(self, x_px: int | float) -> int:
         left = float(self.left_endpoint_px)
@@ -281,18 +303,66 @@ class BallUartClient:
         with self._outbound_lock:
             self._latest_position = None
 
+    def set_output_provider(self, provider: Callable[[float], Any] | None) -> None:
+        """Install a nonblocking estimator sampler; it never writes the UART itself."""
+
+        if provider is not None and not callable(provider):
+            raise TypeError("output provider must be callable or None")
+        with self._outbound_lock:
+            self._output_provider = provider
+
+    def clear_output_provider(self) -> None:
+        self.set_output_provider(None)
+
     def get_status(self) -> dict[str, Any]:
         return self.get_statistics()
 
+    @staticmethod
+    def _encode_provider_output(value: Any) -> bytes:
+        output = getattr(value, "output_mm", value)
+        if output is None:
+            return encode_command("INVALID")
+        return encode_position(max(-125, min(125, int(round(float(output))))))
+
     def _next_outbound(self, now: float, next_position: float) -> tuple[bytes | None, float]:
+        period = 1.0 / self.send_rate_hz
+        if now < next_position:
+            return None, next_position
+        if next_position <= 0.0:
+            next_position = now
+        lateness = max(0.0, now - next_position)
+        missed = int(lateness // period)
+        if missed:
+            self._tx_deadline_miss_count += missed
+        next_deadline = next_position + (missed + 1) * period
+        self._last_tx_jitter_ms = lateness * 1000.0
+        self._scheduled_output_pending = False
+        provider: Callable[[float], Any] | None = None
         with self._outbound_lock:
             if self._control:
-                return self._control.popleft(), next_position
-            if self._desired_running and self._latest_position is not None and now >= next_position:
+                return self._control.popleft(), next_deadline
+            if not self._desired_running:
+                return None, next_deadline
+            if self.continuous_output and self._output_provider is not None:
+                provider = self._output_provider
+            elif self._latest_position is not None:
                 _position, data = self._latest_position
                 self._latest_position = None
-                return data, now + 1.0 / self.send_rate_hz
-        return None, next_position
+                self._scheduled_output_pending = True
+                return data, next_deadline
+        if provider is not None:
+            try:
+                data = self._encode_provider_output(provider(now))
+            except Exception as exc:
+                self._provider_error_count += 1
+                self._last_error = f"output provider failed: {exc}"
+                if self._last_error != self._last_logged_error:
+                    LOG.warning("%s", self._last_error)
+                    self._last_logged_error = self._last_error
+                data = encode_command("INVALID")
+            self._scheduled_output_pending = True
+            return data, next_deadline
+        return None, next_deadline
 
     def _prepare_open_connection(self) -> None:
         """Drop stale output and queue at most one START for this connection."""
@@ -410,6 +480,7 @@ class BallUartClient:
                     with self._serial_lock:
                         self._serial = opened
                     self._opened_at = time.monotonic()
+                    next_position = self._opened_at
                     self._ready = True
                     self._last_valid_rx_at = None
                     self._prepare_open_connection()
@@ -438,6 +509,9 @@ class BallUartClient:
                     if data.startswith(b"BALL POS"):
                         self._position_tx_count += 1
                         self._position_tx_rate.record(now)
+                        self._output_tx_count += 1
+                        self._output_tx_rate.record(now)
+                        self._tx_jitter.add(self._last_tx_jitter_ms)
                         self._last_sent_position = int(data.split()[2])
                         if self.debug and now - self._last_position_debug_at >= self.debug_position_interval_s:
                             LOG.info("UART TX %s", data.decode("ascii").strip())
@@ -445,6 +519,9 @@ class BallUartClient:
                     elif data == b"BALL INVALID\r\n":
                         self._invalid_tx_count += 1
                         self._invalid_tx_rate.record(now)
+                        self._output_tx_count += 1
+                        self._output_tx_rate.record(now)
+                        self._tx_jitter.add(self._last_tx_jitter_ms)
                         if self.debug and now - self._last_invalid_debug_at >= self.debug_position_interval_s:
                             LOG.info("UART TX BALL INVALID")
                             self._last_invalid_debug_at = now
@@ -467,8 +544,9 @@ class BallUartClient:
                         LOG.info("UART TX %s", data.decode("ascii").strip())
                 if now >= next_statistics:
                     LOG.info(
-                        "UART stats pos=%d invalid=%d ok_pos=%d ok_invalid=%d latest=%s replaced=%d",
+                        "UART stats pos=%d invalid=%d output_hz=%.1f ok_pos=%d ok_invalid=%d latest=%s replaced=%d",
                         self._position_tx_count, self._invalid_tx_count,
+                        self._output_tx_rate.rate(now),
                         self._ok_position_rx_count, self._ok_invalid_rx_count,
                         self._last_sent_position, self._position_replacements,
                     )
@@ -503,6 +581,7 @@ class BallUartClient:
             LOG.info("steel-ball UART closed: %s", self.port)
 
     def get_statistics(self) -> dict[str, Any]:
+        jitter = self._tx_jitter.summary()
         return {
             "enabled": self.enabled,
             "running": self.is_running(),
@@ -521,6 +600,18 @@ class BallUartClient:
             "position_replacements": self._position_replacements,
             "invalid_tx_count": self._invalid_tx_count,
             "invalid_tx_hz": self._invalid_tx_rate.rate(),
+            "output_tx_count": self._output_tx_count,
+            "output_tx_hz": self._output_tx_rate.rate(),
+            "uart_output_tx_hz": self._output_tx_rate.rate(),
+            "uart_output_period_ms": 1000.0 / self.send_rate_hz,
+            "uart_worst_case_frame_bytes": worst_case_position_frame_bytes(),
+            "uart_estimated_tx_utilization": estimated_tx_utilization(
+                self.baudrate, self.send_rate_hz
+            ),
+            "uart_tx_deadline_miss_count": self._tx_deadline_miss_count,
+            "uart_tx_jitter_ms": self._last_tx_jitter_ms,
+            "uart_tx_jitter_p95_ms": float(jitter["p95"]),
+            "output_provider_error_count": self._provider_error_count,
             "control_tx_count": self._control_tx_count,
             "reconnects": self._reconnects,
             "ok_position_rx_count": self._ok_position_rx_count,

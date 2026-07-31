@@ -12,9 +12,11 @@ from drivers.ball_uart_client import (
     READY_LINE,
     BallUartClient,
     BallUartState,
+    estimated_tx_utilization,
     encode_command,
     encode_position,
     parse_reply,
+    worst_case_position_frame_bytes,
 )
 
 
@@ -222,7 +224,7 @@ def test_serial_factory_receives_exact_9600_8n1_settings() -> None:
     client.close()
     assert captured == {
         "port": "/dev/ttyAMA0", "baudrate": 9600, "bytesize": 8,
-        "parity": "N", "stopbits": 1, "timeout": 0.02,
+        "parity": "N", "stopbits": 1, "timeout": 0.005,
         "write_timeout": 0.05, "xonxoff": False, "rtscts": False,
         "dsrdtr": False,
     }
@@ -235,8 +237,8 @@ def test_read_failure_reconnects_and_waits_for_new_ready() -> None:
         reconnect_interval_s=0.01,
     )
     client.start()
+    wait_until(lambda: client.get_statistics()["reconnects"] >= 1)
     wait_until(client.is_ready)
-    assert client.get_statistics()["reconnects"] >= 1
     client.close()
 
 
@@ -280,7 +282,7 @@ def test_absent_replies_do_not_discard_position_or_stop_output() -> None:
     client.send_start()
     client.publish_ball_position(12)
     first, next_at = client._next_outbound(time.monotonic(), 0.0)
-    second, _ = client._next_outbound(time.monotonic(), next_at)
+    second, _ = client._next_outbound(next_at, next_at)
     assert first == encode_command("START")
     assert second == encode_position(12)
     assert client._desired_running is True
@@ -294,7 +296,7 @@ def test_recovered_link_sends_start_before_new_position() -> None:
     client.feed_received(b"OK C=BALL_PING\r")
     client.publish_ball_position(8)
     first, next_at = client._next_outbound(time.monotonic(), 0.0)
-    second, _ = client._next_outbound(time.monotonic(), next_at)
+    second, _ = client._next_outbound(next_at, next_at)
     assert first == encode_command("START")
     assert second == encode_position(8)
     client._thread = None
@@ -572,3 +574,98 @@ def test_runtime_entrypoint_uses_ascii_client_not_removed_binary_uart() -> None:
     assert "SerialService(" not in app_source
     assert "encode_ball_position" not in client_source
     assert "A5" not in client_source and "AA 55" not in client_source
+
+
+def test_9600_8n1_50hz_bandwidth_uses_actual_maximum_frame() -> None:
+    assert worst_case_position_frame_bytes() == len(b"BALL POS -125\r\n") == 15
+    assert estimated_tx_utilization(9600, 50) == pytest.approx(0.78125)
+    assert estimated_tx_utilization(9600, 50) < 0.85
+
+
+def test_continuous_provider_produces_about_500_outputs_in_ten_seconds() -> None:
+    client = BallUartClient(continuous_output=True)
+    client._thread = threading.current_thread()
+    client.set_output_provider(lambda _now: None)
+    client.send_start()
+    data, deadline = client._next_outbound(100.0, 0.0)
+    assert data == encode_command("START")
+    outputs = []
+    for _ in range(500):
+        data, deadline = client._next_outbound(deadline, deadline)
+        outputs.append(data)
+    client._thread = None
+    assert outputs == [encode_command("INVALID")] * 500
+
+
+def test_continuous_provider_repeats_current_state_without_new_publication() -> None:
+    client = BallUartClient(continuous_output=True)
+    client.set_output_provider(lambda _now: 7)
+    client.send_start()
+    first, deadline = client._next_outbound(200.0, 0.0)
+    second, deadline = client._next_outbound(deadline, deadline)
+    third, _ = client._next_outbound(deadline, deadline)
+    assert first == encode_command("START")
+    assert second == third == encode_position(7)
+
+
+def test_missed_deadlines_are_skipped_without_catchup_burst() -> None:
+    client = BallUartClient(continuous_output=True)
+    client.set_output_provider(lambda _now: 1)
+    client.send_start()
+    _, deadline = client._next_outbound(300.0, 0.0)
+    delayed = deadline + 0.105
+    output, next_deadline = client._next_outbound(delayed, deadline)
+    immediate, same_deadline = client._next_outbound(delayed, next_deadline)
+    assert output == encode_position(1)
+    assert immediate is None and same_deadline == next_deadline
+    assert client.get_statistics()["uart_tx_deadline_miss_count"] >= 5
+
+
+def test_provider_is_called_outside_uart_outbound_lock() -> None:
+    client = BallUartClient(continuous_output=True)
+    lock_was_free = []
+
+    def provider(_now):
+        acquired = client._outbound_lock.acquire(blocking=False)
+        lock_was_free.append(acquired)
+        if acquired:
+            client._outbound_lock.release()
+        return 0
+
+    client.set_output_provider(provider)
+    client.send_start()
+    _, deadline = client._next_outbound(400.0, 0.0)
+    assert client._next_outbound(deadline, deadline)[0] == encode_position(0)
+    assert lock_was_free == [True]
+
+
+def test_stop_suppresses_continuous_provider_output() -> None:
+    client = BallUartClient(continuous_output=True)
+    client.set_output_provider(lambda _now: 3)
+    client.send_start()
+    _, deadline = client._next_outbound(500.0, 0.0)
+    client.send_stop()
+    stop, deadline = client._next_outbound(deadline, deadline)
+    output, _ = client._next_outbound(deadline, deadline)
+    assert stop == encode_command("STOP")
+    assert output is None
+
+
+def test_combined_output_rate_and_jitter_statistics_are_reported() -> None:
+    fake = FakeSerial()
+    client = BallUartClient(
+        serial_factory=lambda **_kwargs: fake,
+        continuous_output=True,
+        send_rate_hz=50,
+    )
+    client.set_output_provider(lambda _now: None)
+    client.send_start()
+    client.start()
+    wait_until(lambda: client.get_statistics()["output_tx_count"] >= 8)
+    client.close()
+    stats = client.get_statistics()
+    assert stats["output_tx_count"] == stats["position_tx_count"] + stats["invalid_tx_count"]
+    assert stats["output_tx_hz"] > 30.0
+    assert stats["uart_output_period_ms"] == pytest.approx(20.0)
+    assert stats["uart_tx_jitter_ms"] >= 0.0
+    assert stats["uart_tx_jitter_p95_ms"] >= 0.0

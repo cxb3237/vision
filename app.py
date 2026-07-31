@@ -26,7 +26,7 @@ from core.vision_runtime import VisionRuntime
 from detectors.pipe_marker_detector import PipeMarkerDetector
 from detectors.steel_ball_yolo_ncnn_detector import SteelBallYoloNcnnDetector
 from detectors.target_tracker import TargetTracker
-from drivers.ball_uart_client import BallUartClient
+from drivers.ball_uart_client import BallUartClient, estimated_tx_utilization
 from drivers.camera_service import CameraService
 from touch_ui.models import (
     TouchUIConfig,
@@ -123,15 +123,18 @@ def resolve_ball_uart_settings(args: argparse.Namespace, mission: dict[str, Any]
     profile = mission["ball_uart"]
     baudrate = profile["baudrate"] if args.baudrate is None else args.baudrate
     send_rate = profile["send_rate_hz"] if args.serial_rate is None else args.serial_rate
-    if baudrate <= 0:
+    if baudrate != 9600:
         raise ConfigError("--baudrate 必须为正整数")
     if send_rate <= 0:
         raise ConfigError("--serial-rate 必须为正数")
+    if estimated_tx_utilization(int(baudrate), float(send_rate)) > 0.85:
+        raise ConfigError("--serial-rate exceeds the 85% UART utilization limit")
     return {
         "enabled": bool(profile["enabled"] and not args.no_serial) or bool(args.serial_port and not args.no_serial),
         "port": args.serial_port or profile["port"],
         "baudrate": int(baudrate),
         "send_rate_hz": float(send_rate),
+        "continuous_output": bool(profile["continuous_output"]),
         "timeout_s": float(profile["timeout_s"]),
         "write_timeout_s": float(profile["write_timeout_s"]),
         "reconnect_interval_s": float(profile["reconnect_interval_s"]),
